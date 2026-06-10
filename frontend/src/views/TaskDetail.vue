@@ -115,14 +115,17 @@
                              : 'bg-white border-gray-100 hover:bg-gray-50 hover:border-gray-300']"
                   title="点击在左侧 PDF 中定位"
                 >
-                  <div v-if="block.type === 'image'" class="text-blue-500 text-xs font-semibold mb-1 flex items-center gap-1 select-none"><Image class="w-3.5 h-3.5"/> [提取图片]</div>
-                  <div v-else-if="block.type === 'table'" class="text-green-500 text-xs font-semibold mb-1 flex items-center gap-1 select-none"><Table class="w-3.5 h-3.5"/> [提取表格]</div>
-                  <div v-else-if="block.type === 'doc_title'" class="text-lg font-bold text-gray-900 mb-1 border-b pb-1">{{ block.text }}</div>
+                  <div v-if="isImageBlock(block.type)" class="text-blue-500 text-xs font-semibold mb-1 flex items-center gap-1 select-none"><Image class="w-3.5 h-3.5"/> [提取图片]</div>
+                  <div v-else-if="isTableBlock(block.type)" class="text-green-500 text-xs font-semibold mb-1 flex items-center gap-1 select-none"><Table class="w-3.5 h-3.5"/> [提取表格]</div>
+                  <div v-else-if="isTitleBlock(block.type)" class="text-lg font-bold text-gray-900 mb-1 border-b pb-1">{{ block.text }}</div>
 
-                  <div v-if="block.type === 'table'" class="w-full overflow-x-auto mt-2 markdown-table-override">
+                  <div v-if="isTableBlock(block.type)" class="w-full overflow-x-auto mt-2 markdown-table-override">
                     <MarkdownViewer :content="block.text" />
                   </div>
-                  <div v-else-if="block.type !== 'doc_title'" class="whitespace-pre-wrap font-mono text-gray-600">{{ block.text }}</div>
+                  <div v-else-if="isEquationBlock(block.type)" class="w-full overflow-x-auto">
+                    <MarkdownViewer :content="toEquationMarkdown(block.text)" />
+                  </div>
+                  <div v-else-if="!isTitleBlock(block.type)" class="whitespace-pre-wrap font-mono text-gray-600">{{ block.text }}</div>
                 </div>
               </div>
               <div v-else class="text-gray-500 text-sm italic text-center mt-10">未能提取到结构化版面数据。</div>
@@ -182,14 +185,37 @@ const layoutData = computed(() => {
 
   let flatBlocks: any[] = []
 
-  // 从 MinerU content_list_v2 嵌套 content 对象中提取纯文本
+  // 从 MinerU content_list_v2 嵌套 content 对象中提取纯文本/可渲染内容
   const extractV2Text = (block: any): string => {
-      if (block.text) return block.text
+      // 1. 扁平格式 (content_list_v1 / vlm)：直接带 text 字段
+      if (typeof block.text === 'string' && block.text) return block.text
+
       const c = block.content
       if (!c) return ''
-      const lists = c.title_content ?? c.paragraph_content ?? c.table_content ?? c.list_content ?? []
-      if (Array.isArray(lists)) return lists.map((item: any) => item.content ?? '').join('')
+
+      // 2. content 为纯字符串 (部分 v2 导出为扁平字符串)
       if (typeof c === 'string') return c
+      if (typeof c !== 'object') return ''
+
+      // 3. content 为嵌套对象 (content_list_v2)
+      // 3a. 公式：math_content 为 latex 源码
+      if (typeof c.math_content === 'string') return c.math_content
+      // 3b. 表格：html
+      if (typeof c.html === 'string') return c.html
+      // 3c. 列表：list_items[].item_content[].content
+      if (Array.isArray(c.list_items)) {
+          return c.list_items
+              .map((it: any) => (it.item_content ?? []).map((x: any) => x.content ?? '').join(''))
+              .filter(Boolean)
+              .join('\n')
+      }
+      // 3d. 通用 *_content 数组 (paragraph/title/page_header/page_number/page_aside_text 等)
+      const listKey = Object.keys(c).find(k => k.endsWith('_content') && Array.isArray(c[k]))
+      if (listKey) return c[listKey].map((item: any) => item.content ?? '').join('')
+      // 3e. 图片：用 caption 兜底
+      if (Array.isArray(c.image_caption)) {
+          return c.image_caption.map((x: any) => x.content ?? '').join(' ')
+      }
       return ''
   }
 
@@ -226,7 +252,12 @@ const layoutData = computed(() => {
       flatBlocks = jsonContent.parsing_res_list.map((b: any, i: number) => ({ ...b, _page_idx: pageIdx, _idx: i, _page_width: jsonContent.width }))
   }
 
-  const formattedBlocks = flatBlocks.map((b, globalIdx) => {
+  // 双向定位视图中无需展示的版面噪声块（页码等），按需在此扩展（如 'page_header'/'page_aside_text'）
+  const HIDDEN_BLOCK_TYPES = new Set(['page_number'])
+
+  const formattedBlocks = flatBlocks
+      .filter((b) => !HIDDEN_BLOCK_TYPES.has(b.type ?? b.block_label))
+      .map((b, globalIdx) => {
       const pIdx = b.page_idx ?? b._page_idx ?? 0;
       const uniqueId = `block-${pIdx}-${globalIdx}`;
 
@@ -258,6 +289,19 @@ const layoutData = computed(() => {
 
   return formattedBlocks;
 })
+
+// 双向定位视图的 block 类型判定与公式渲染辅助
+const isImageBlock = (t: string) => t === 'image'
+const isTableBlock = (t: string) => t === 'table'
+const isEquationBlock = (t: string) => typeof t === 'string' && t.includes('equation')
+const isTitleBlock = (t: string) => t === 'doc_title' || t === 'title'
+const toEquationMarkdown = (text: string) => {
+  const s = (text || '').trim()
+  if (!s) return ''
+  // 已含定界符 ($$ / \[ \] / \( \) / $) 则原样交给 MarkdownViewer，否则按块级公式包裹
+  if (s.includes('$$') || s.includes('\\[') || s.includes('\\(') || s.startsWith('$')) return s
+  return `$$\n${s}\n$$`
+}
 
 const handlePdfBlockClick = (block: any) => {
   if (!block) return
