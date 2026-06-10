@@ -6,7 +6,7 @@
 2. 图片目录统一为 images/
 3. 图片引用路径统一为 images/xxx.jpg
 4. JSON 文件名统一为 result.json
-5. 自动上传图片到 RustFS 对象存储并替换 URL
+5. 自动上传图片到 MinIO 对象存储并替换 URL
 
 支持的引擎：
 - MinerU (pipeline)

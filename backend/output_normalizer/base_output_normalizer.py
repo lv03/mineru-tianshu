@@ -13,7 +13,7 @@ import os
 class BaseOutputNormalizer:
     """
     输出结果规范化器基类
-    定义了规范化的基本流程和公共方法（如 RustFS 上传）
+    定义了规范化的基本流程和公共方法（如 MinIO 上传）
     """
 
     STANDARD_MARKDOWN_NAME = "result.md"
@@ -24,7 +24,7 @@ class BaseOutputNormalizer:
         """
         初始化规范化器
         """
-        self._rustfs_client = None
+        self._minio_client = None
 
     def normalize(self, output_dir: Path) -> Dict[str, Any]:
         """
@@ -50,22 +50,25 @@ class BaseOutputNormalizer:
         result.setdefault("json_file", None)
         result.setdefault("image_dir", None)
         result.setdefault("image_count", 0)
-        result.setdefault("rustfs_enabled", False)
+        result.setdefault("minio_enabled", False)
         result.setdefault("images_uploaded", False)
 
-        # 2. 自动上传图片到 RustFS 并替换 URL（基础功能，始终启用）
+        # 2. 自动上传图片到 MinIO 并替换 URL（基础功能，始终启用）
         if result["image_dir"] and result["image_count"] > 0:
-            self._process_rustfs_upload(result)
+            self._process_minio_upload(result)
         else:
             logger.debug("ℹ️  No images to upload")
-            result["rustfs_enabled"] = False
+            result["minio_enabled"] = False
             result["images_uploaded"] = False
+
+        # 兼容旧 API 字段
+        result["rustfs_enabled"] = result["minio_enabled"]
 
         logger.info("✅ Normalization complete:")
         logger.info(f"   Markdown: {result['markdown_file']}")
         logger.info(f"   Images: {result['image_count']} files in {result['image_dir']}")
         logger.info(f"   JSON: {result['json_file']}")
-        logger.info(f"   RustFS: {result['rustfs_enabled']} (uploaded: {result['images_uploaded']})")
+        logger.info(f"   MinIO: {result['minio_enabled']} (uploaded: {result['images_uploaded']})")
 
         return result
 
@@ -85,21 +88,25 @@ class BaseOutputNormalizer:
         """
         raise NotImplementedError
 
-    def _process_rustfs_upload(self, result: Dict[str, Any]):
-        """处理 RustFS 上传和 URL 替换"""
+    def _process_minio_upload(self, result: Dict[str, Any]):
+        """处理 MinIO 上传和 URL 替换"""
 
-        # 检查是否启用 RustFS
-        rustfs_enabled = os.getenv("RUSTFS_ENABLED", "true").lower() in ("true", "1", "yes")
+        # 检查是否启用 MinIO，兼容旧 RUSTFS_ENABLED 配置
+        minio_enabled = os.getenv("MINIO_ENABLED", os.getenv("RUSTFS_ENABLED", "true")).lower() in (
+            "true",
+            "1",
+            "yes",
+        )
 
-        if not rustfs_enabled:
-            logger.info("ℹ️  RustFS is disabled (RUSTFS_ENABLED=false), using local file service")
-            result["rustfs_enabled"] = False
+        if not minio_enabled:
+            logger.info("ℹ️  MinIO is disabled (MINIO_ENABLED=false), using local file service")
+            result["minio_enabled"] = False
             result["images_uploaded"] = False
             return
 
         try:
-            logger.info(f"📤 Uploading {result['image_count']} images to RustFS...")
-            url_mapping = self._upload_images_to_rustfs(result["image_dir"])
+            logger.info(f"📤 Uploading {result['image_count']} images to MinIO...")
+            url_mapping = self._upload_images_to_minio(result["image_dir"])
 
             if url_mapping:
                 # 替换 Markdown 中的图片路径
@@ -110,41 +117,41 @@ class BaseOutputNormalizer:
                 if result["json_file"]:
                     self._replace_json_urls(result["json_file"], url_mapping)
 
-                result["rustfs_enabled"] = True
+                result["minio_enabled"] = True
                 result["images_uploaded"] = True
-                logger.info(f"✅ Images uploaded to RustFS: {len(url_mapping)}/{result['image_count']}")
+                logger.info(f"✅ Images uploaded to MinIO: {len(url_mapping)}/{result['image_count']}")
             else:
                 logger.warning("⚠️  No images uploaded (url_mapping empty)")
-                result["rustfs_enabled"] = False
+                result["minio_enabled"] = False
                 result["images_uploaded"] = False
         except Exception as e:
-            logger.error(f"❌ Failed to upload images to RustFS: {e}")
+            logger.error(f"❌ Failed to upload images to MinIO: {e}")
             logger.error(f"   Error details: {type(e).__name__}: {str(e)}")
-            result["rustfs_enabled"] = False
+            result["minio_enabled"] = False
             result["images_uploaded"] = False
-            # RustFS 上传失败不应中断主流程，继续使用本地路径
-            logger.warning("⚠️  Continuing with local image paths (RustFS upload failed)")
+            # MinIO 上传失败不应中断主流程，继续使用本地路径
+            logger.warning("⚠️  Continuing with local image paths (MinIO upload failed)")
 
-    def _upload_images_to_rustfs(self, image_dir: Path) -> Dict[str, str]:
+    def _upload_images_to_minio(self, image_dir: Path) -> Dict[str, str]:
         """
-        上传图片到 RustFS 对象存储
+        上传图片到 MinIO 对象存储
 
         Args:
             image_dir: 图片目录
 
         Returns:
-            {本地文件名: RustFS URL} 的映射字典
+            {本地文件名: MinIO URL} 的映射字典
         """
         # 延迟导入，避免在不需要时初始化
         try:
-            from storage import RustFSClient
+            from storage import MinIOClient
 
-            if self._rustfs_client is None:
-                self._rustfs_client = RustFSClient()
+            if self._minio_client is None:
+                self._minio_client = MinIOClient()
 
             # 直接上传，使用日期前缀 (YYYYMMDD/短uuid.ext)
-            logger.info(f"📤 Uploading images to RustFS: {image_dir}")
-            url_mapping = self._rustfs_client.upload_directory(
+            logger.info(f"📤 Uploading images to MinIO: {image_dir}")
+            url_mapping = self._minio_client.upload_directory(
                 str(image_dir),
                 prefix=None,  # 不使用额外前缀，直接用日期分组
             )
@@ -152,16 +159,16 @@ class BaseOutputNormalizer:
             return url_mapping
 
         except Exception as e:
-            logger.error(f"❌ Failed to initialize RustFS client: {e}")
+            logger.error(f"❌ Failed to initialize MinIO client: {e}")
             raise
 
     def _replace_markdown_urls(self, md_file: Path, url_mapping: Dict[str, str]):
         """
-        替换 Markdown 中的图片路径为 RustFS URL
+        替换 Markdown 中的图片路径为 MinIO URL
 
         Args:
             md_file: Markdown 文件
-            url_mapping: {本地文件名: RustFS URL} 映射
+            url_mapping: {本地文件名: MinIO URL} 映射
         """
         try:
             content = md_file.read_text(encoding="utf-8")
@@ -219,11 +226,11 @@ class BaseOutputNormalizer:
 
     def _replace_json_urls(self, json_file: Path, url_mapping: Dict[str, str]):
         """
-        替换 JSON 中的图片路径为 RustFS URL
+        替换 JSON 中的图片路径为 MinIO URL
 
         Args:
             json_file: JSON 文件
-            url_mapping: {本地文件名: RustFS URL} 映射
+            url_mapping: {本地文件名: MinIO URL} 映射
         """
         try:
             with open(json_file, "r", encoding="utf-8") as f:

@@ -31,7 +31,7 @@ from .dependencies import (
 )
 from .sso import get_sso_config, create_sso_provider, OIDC_AVAILABLE
 from .system_config import SystemConfig
-from storage.rustfs_client import get_rustfs_client
+from storage.minio_client import get_minio_client
 
 # 创建路由
 router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
@@ -517,7 +517,7 @@ async def upload_system_logo(
     """
     上传系统 Logo (管理员)
 
-    需要管理员权限。上传 Logo 图片文件到 RustFS，支持 PNG、JPG、SVG 等格式。
+    需要管理员权限。上传 Logo 图片文件到 MinIO，支持 PNG、JPG、SVG 等格式。
     """
     import tempfile
     from pathlib import Path
@@ -543,9 +543,9 @@ async def upload_system_logo(
             tmp_file.write(content)
             tmp_file_path = tmp_file.name
 
-        # 上传到 RustFS (使用 logos/ 前缀)
-        rustfs = get_rustfs_client()
-        logo_url = rustfs.upload_file(
+        # 上传到 MinIO (使用 logos/ 前缀)
+        minio = get_minio_client()
+        logo_url = minio.upload_file(
             file_path=tmp_file_path,
             object_name=f"logos/logo{file_ext}",  # 固定名称，方便替换
         )

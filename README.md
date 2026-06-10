@@ -72,16 +72,16 @@
   - `WORKER_MEMORY_LIMIT`: 容器硬内存限制（默认 `16G`）
   - `WORKER_MEMORY_RESERVATION`: 内存软限制/预留（默认 `8G`）
 
-### 2025-12-05 🗄️ RustFS 对象存储集成
+### 2025-12-05 🗄️ MinIO 对象存储集成
 
-- ✅ **RustFS 对象存储**：所有解析结果的图片自动上传到对象存储
+- ✅ **MinIO 对象存储**：所有解析结果的图片自动上传到对象存储
   - S3 兼容 API，基于 minio-py 实现
   - 批量上传图片，自动生成公开访问 URL
   - 短且唯一的文件名生成（时间戳 Base62 + NanoID）
   - 按日期自动分组（YYYYMMDD/文件名.ext）
   - Markdown/JSON 中的图片路径自动替换为对象存储 URL
-  - Docker Compose 一键部署 RustFS 服务
-  - 需配置 `RUSTFS_PUBLIC_URL` 环境变量（外部可访问地址）
+  - Docker Compose 一键部署 MinIO 服务
+  - 需配置 `MINIO_PUBLIC_URL` 环境变量（外部可访问地址）
 - ✅ **输出标准化优化**：改进图片路径处理，统一使用对象存储 URL
 - ✅ **配置简化**：精简 `.env.example` 配置文件，移除冗余选项
 
@@ -453,13 +453,13 @@ cd /opt/tianshu
 - ✅ **统一镜像**：自动检测 GPU，有则加速，无则 CPU 降级
 - ✅ **跨平台构建**：支持在 Mac（Apple Silicon/Intel）构建 Linux amd64 镜像
 - ✅ **完全离线**：所有模型（~15GB）和依赖预先打包
-- ✅ **一键部署**：自动配置环境变量、JWT 密钥、RustFS 对象存储
+- ✅ **一键部署**：自动配置环境变量、JWT 密钥、MinIO 对象存储
 - ✅ **Office 文档支持**：自动转换 .doc/.docx/.pptx 等格式为 PDF 后处理
 
 **关键修复**：
 - 🔧 Worker uploads 目录读写权限（支持 Office 转 PDF）
 - 🔧 albumentations/albucore 版本锁定（解决 MinerU 公式识别依赖）
-- 🔧 RustFS 镜像平台指定（确保 amd64 架构一致性）
+- 🔧 MinIO 镜像与对象存储配置更新
 
 📖 **详细说明**：[DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)
 

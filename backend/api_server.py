@@ -139,7 +139,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 logger.info(f"📁 Upload directory: {UPLOAD_DIR}")
 
 
-# 注意：此函数已废弃，Worker 已自动上传图片到 RustFS 并替换 URL
+# 注意：此函数已废弃，Worker 已自动上传图片到 MinIO 并替换 URL
 def process_markdown_images_legacy(md_content: str, image_dir: Path, result_path: str):
     """
     【向后兼容】处理 Markdown 中的图片引用
@@ -326,7 +326,7 @@ async def submit_task(
             "markdownIgnoreLabels": [label.strip() for label in markdownIgnoreLabels.split(",") if label.strip()],
         }
 
-        options["upload_images"] = os.getenv("RUSTFS_ENABLED", "true").lower() == "true"
+        options["upload_images"] = os.getenv("MINIO_ENABLED", os.getenv("RUSTFS_ENABLED", "true")).lower() == "true"
 
         task_id = db.create_task(
             file_name=file.filename,
@@ -356,7 +356,7 @@ async def submit_task(
 @router.get("/tasks/{task_id}", tags=["任务管理"])
 async def get_task_status(
     task_id: str,
-    upload_images: bool = Query(False, description="【已废弃】图片已自动上传到 RustFS"),
+    upload_images: bool = Query(False, description="【已废弃】图片已自动上传到 MinIO"),
     format: str = Query("markdown", description="返回格式: markdown(默认)/json/both"),
     current_user: User = Depends(get_current_active_user),
 ):
