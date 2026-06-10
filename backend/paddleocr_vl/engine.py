@@ -64,7 +64,7 @@ class PaddleOCRVLEngine:
                     cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self, device: str = "cuda:0", model_name: str = "PaddleOCR-VL-1.5-0.9B"):
+    def __init__(self, device: str = "cuda:0", model_name: str = "PaddleOCR-VL-1.6-0.9B"):
         if self._initialized:
             return
 
@@ -157,14 +157,15 @@ class PaddleOCRVLEngine:
             pdx_home = os.environ.get("PADDLEX_HOME", "/root/.paddlex")
             local_cache_path = Path(pdx_home) / "official_models" / self.model_name
 
-            pipeline_source = self.model_name
-
             # 如果本地存在模型文件，优先使用本地路径
             if local_cache_path.exists() and any(local_cache_path.iterdir()):
                 logger.info(f"📂 Found local model cache: {local_cache_path}")
                 pipeline_source = str(local_cache_path)
             else:
-                logger.info(f"🌐 Local model not found at {local_cache_path}, attempting auto-download...")
+                raise FileNotFoundError(
+                    f"PaddleOCR-VL local model not found: {local_cache_path}. "
+                    "Please mount/download models under backend/model before startup."
+                )
 
             try:
                 # 创建 Pipeline
@@ -412,7 +413,7 @@ class PaddleOCRVLEngine:
 _engine_instance = None
 
 
-def get_engine(model_name: str = "PaddleOCR-VL-1.5-0.9B") -> PaddleOCRVLEngine:
+def get_engine(model_name: str = "PaddleOCR-VL-1.6-0.9B") -> PaddleOCRVLEngine:
     global _engine_instance
     if _engine_instance is None:
         _engine_instance = PaddleOCRVLEngine(model_name=model_name)

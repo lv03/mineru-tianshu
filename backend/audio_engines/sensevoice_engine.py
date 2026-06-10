@@ -21,6 +21,7 @@ SenseVoice 语音识别引擎
 """
 
 import json
+import os
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from threading import Lock
@@ -44,6 +45,10 @@ class SenseVoiceEngine:
     _paraformer_model = None  # Paraformer 模型（支持说话人分离）
     _initialized = False
 
+    @staticmethod
+    def _model_root() -> Path:
+        return Path(os.getenv("MODEL_PATH", "/app/models"))
+
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
             with cls._lock:
@@ -53,7 +58,7 @@ class SenseVoiceEngine:
 
     def __init__(
         self,
-        model_dir: str = "iic/SenseVoiceSmall",
+        model_dir: Optional[str] = None,
         cache_dir: Optional[str] = None,
         device: str = "cuda:0",
         enable_speaker_diarization: bool = False,
@@ -76,7 +81,7 @@ class SenseVoiceEngine:
             if self._initialized:
                 return
 
-            self.model_dir = model_dir
+            self.model_dir = model_dir or str(self._model_root() / "SenseVoiceSmall")
             self.device = device  # 保存 device 参数
             self.enable_speaker_diarization = enable_speaker_diarization
             self.use_paraformer_for_diarization = use_paraformer_for_diarization
@@ -85,10 +90,9 @@ class SenseVoiceEngine:
             if enable_speaker_diarization:
                 logger.info("⚠️  说话人分离需要时间戳支持，将在首次使用时加载 Paraformer 模型")
 
-            # 默认缓存目录：项目根目录/models/sensevoice
+            # 默认缓存目录：MODEL_PATH/SenseVoiceSmall，避免启动时触发远程下载
             if cache_dir is None:
-                project_root = Path(__file__).parent.parent.parent
-                self.cache_dir = str(project_root / "models" / "sensevoice")
+                self.cache_dir = str(self._model_root() / "SenseVoiceSmall")
             else:
                 self.cache_dir = cache_dir
 
@@ -143,8 +147,14 @@ class SenseVoiceEngine:
 
                         # 使用 Paraformer 模型（支持时间戳和说话人分离）
                         # 参考：https://github.com/lukeewin/AudioSeparationGUI
+                        paraformer_dir = self._model_root() / "Paraformer"
+                        if not paraformer_dir.exists():
+                            raise FileNotFoundError(
+                                f"Paraformer local model not found: {paraformer_dir}. "
+                                "Please mount/download models under backend/model before startup."
+                            )
                         self._paraformer_model = AutoModel(
-                            model="iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+                            model=str(paraformer_dir),
                             vad_model="fsmn-vad",
                             vad_kwargs={"max_single_segment_time": 30000},
                             punc_model="ct-punc",  # 标点模型（说话人分离必需）
@@ -168,6 +178,11 @@ class SenseVoiceEngine:
                 else:
                     # 不需要说话人分离，使用 SenseVoice 模型
                     if self._sensevoice_model is None:
+                        if not Path(self.model_dir).exists():
+                            raise FileNotFoundError(
+                                f"SenseVoice local model not found: {self.model_dir}. "
+                                "Please mount/download models under backend/model before startup."
+                            )
                         logger.info("📥 Loading SenseVoice Model...")
                         logger.info("=" * 60)
                         logger.info(f"🤖 Loading model from: {self.model_dir}")
@@ -201,9 +216,9 @@ class SenseVoiceEngine:
                 logger.error("💡 排查建议:")
                 logger.error("   1. 安装 FunASR:")
                 logger.error("      pip install funasr>=1.2.7")
-                logger.error("   2. 检查网络连接（首次使用需要下载模型）")
+                logger.error("   2. 检查本地模型目录是否挂载到 MODEL_PATH")
                 logger.error("   3. 检查 GPU 可用性")
-                logger.error("   4. 模型会自动从 ModelScope 下载")
+                logger.error("   4. 默认启动不会自动下载模型，请确认 backend/model 已包含所需模型")
                 logger.error("=" * 80)
 
                 import traceback

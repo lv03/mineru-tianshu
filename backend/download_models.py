@@ -41,10 +41,10 @@ MODELS = {
         "required": True,
     },
     "mineru_vlm": {
-        "name": "MinerU 2.5 VLM (1.2B)",
-        "model_id": "opendatalab/MinerU2.5-2509-1.2B",
+        "name": "MinerU 2.5 Pro VLM (1.2B)",
+        "model_id": "OpenDataLab/MinerU2.5-Pro-2605-1.2B",
         "source": "modelscope",
-        "target_dir": "MinerU2.5-2509-1.2B",
+        "target_dir": "MinerU2.5-Pro-2605-1.2B",
         "description": "Vision Language Model (For 'vlm-auto-engine' & 'hybrid-auto-engine')",
         "required": True,
     },
@@ -52,21 +52,13 @@ MODELS = {
     # 2. PaddleX / PaddleOCR 模型
     # -------------------------------------------------------------------------
     # --- 多模态文档解析 (VLM) - 强制预下载供 vLLM 服务使用 ---
-    "paddleocr_vl_1_5": {
-        "name": "PaddleOCR-VL-1.5-0.9B",
-        "repo_id": "PaddlePaddle/PaddleOCR-VL-1.5",
+    "paddleocr_vl_1_6": {
+        "name": "PaddleOCR-VL-1.6-0.9B",
+        "repo_id": "PaddlePaddle/PaddleOCR-VL-1.6",
         "source": "huggingface",
-        "target_dir": "paddlex_cache/official_models/PaddleOCR-VL-1.5-0.9B",
+        "target_dir": "paddlex_cache/official_models/PaddleOCR-VL-1.6-0.9B",
         "description": "Pre-downloaded for vLLM Server to avoid crash loops",
         "required": True,
-    },
-    "paddleocr_vl_0_9": {
-        "name": "PaddleOCR-VL-0.9B",
-        "repo_id": "PaddlePaddle/PaddleOCR-VL",
-        "source": "huggingface",
-        "target_dir": "paddlex_cache/official_models/PaddleOCR-VL-0.9B",
-        "description": "Pre-downloaded for vLLM Server to avoid crash loops",
-        "required": False,
     },
     # --- 版面分析 (Layout) - 运行时自动下载 ---
     "pp_doclayout_v3": {
@@ -229,7 +221,7 @@ def verify_model_files(path, model_name):
             return False
 
     # 3. PaddleOCR-VL VLM 模型验证
-    elif model_name in ["paddleocr_vl_1_5", "paddleocr_vl_0_9"]:
+    elif model_name == "paddleocr_vl_1_6":
         if not any(path_obj.rglob("*.safetensors")):
             logger.warning(f"    ⚠️  No safetensors found in {path}")
             return False
@@ -295,7 +287,7 @@ def generate_mineru_json(output_dir):
 
     # 注意：这里的 paths 是容器内的绝对路径
     config = {
-        "models-dir": {"pipeline": "/app/models/PDF-Extract-Kit-1.0/models", "vlm": "/app/models/MinerU2.5-2509-1.2B"},
+        "models-dir": {"pipeline": "/app/models/PDF-Extract-Kit-1.0/models", "vlm": "/app/models/MinerU2.5-Pro-2605-1.2B"},
         "config_version": "1.3.1",
     }
     try:
@@ -303,7 +295,7 @@ def generate_mineru_json(output_dir):
             json.dump(config, f, ensure_ascii=False, indent=4)
         logger.success(f"✅ mineru.json created at: {config_path}")
         logger.info("    -> pipeline: /app/models/PDF-Extract-Kit-1.0/models")
-        logger.info("    -> vlm:      /app/models/MinerU2.5-2509-1.2B")
+        logger.info("    -> vlm:      /app/models/MinerU2.5-Pro-2605-1.2B")
     except Exception as e:
         logger.error(f"❌ Failed to create mineru.json: {e}")
 

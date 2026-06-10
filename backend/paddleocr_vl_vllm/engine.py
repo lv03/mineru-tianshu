@@ -46,7 +46,7 @@ class PaddleOCRVLVLLMEngine:
                     cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self, device: str = "cuda:0", vllm_api_base: str = None, model_name: str = "PaddleOCR-VL-1.5-0.9B"):
+    def __init__(self, device: str = "cuda:0", vllm_api_base: str = None, model_name: str = "PaddleOCR-VL-1.6-0.9B"):
         if self._initialized:
             return
 
@@ -361,7 +361,7 @@ class PaddleOCRVLVLLMEngine:
 _engine = None
 
 
-def get_engine(vllm_api_base: str = None, model_name: str = "PaddleOCR-VL-1.5-0.9B") -> PaddleOCRVLVLLMEngine:
+def get_engine(vllm_api_base: str = None, model_name: str = "PaddleOCR-VL-1.6-0.9B") -> PaddleOCRVLVLLMEngine:
     global _engine
     if _engine is None:
         _engine = PaddleOCRVLVLLMEngine(vllm_api_base=vllm_api_base, model_name=model_name)

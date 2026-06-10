@@ -5,6 +5,7 @@
 """
 
 import cv2
+import os
 import numpy as np
 from PIL import Image
 from pathlib import Path
@@ -38,8 +39,12 @@ class WatermarkRemover:
     如果未检测到水印，则返回原图
     """
 
-    # 默认使用 HuggingFace 上的 YOLO11x 水印检测模型
-    DEFAULT_MODEL_ID = "corzent/yolo11x_watermark_detection"
+    # 默认使用本地挂载模型，默认启动不再尝试从 HuggingFace 下载。
+    DEFAULT_MODEL_RELATIVE_PATH = "YOLO11/best.pt"
+
+    @staticmethod
+    def _default_model_path() -> str:
+        return str(Path(os.getenv("MODEL_PATH", "/app/models")) / WatermarkRemover.DEFAULT_MODEL_RELATIVE_PATH)
 
     def __init__(self, model_path: Optional[str] = None, device: str = "cuda", use_lama: bool = True):
         """
@@ -47,8 +52,7 @@ class WatermarkRemover:
 
         Args:
             model_path: YOLO 模型路径
-                - None: 使用默认模型 (corzent/yolo11x_watermark_detection)
-                - HuggingFace ID: "username/model-name"
+                - None: 使用默认本地模型 (/app/models/YOLO11/best.pt)
                 - 本地路径: "/path/to/model.pt"
             device: 设备 ("cuda" 或 "cpu")
             use_lama: 是否使用 LaMa 修复 (否则使用 OpenCV)
@@ -56,7 +60,7 @@ class WatermarkRemover:
         if not ULTRALYTICS_AVAILABLE:
             raise ImportError("ultralytics not installed. Install: pip install ultralytics")
 
-        self.model_path = model_path or self.DEFAULT_MODEL_ID
+        self.model_path = model_path or self._default_model_path()
         self.device = device
         self.use_lama = use_lama and LAMA_AVAILABLE
 
@@ -68,38 +72,6 @@ class WatermarkRemover:
         logger.info(f"   Device: {self.device}")
         logger.info(f"   Inpainter: {'LaMa' if self.use_lama else 'OpenCV'}")
 
-    def _download_model_from_hf(self) -> str:
-        """从 HuggingFace 下载模型"""
-        try:
-            from huggingface_hub import hf_hub_download
-        except ImportError:
-            raise ImportError("huggingface_hub not installed. Install: pip install huggingface-hub")
-
-        cache_dir = Path.home() / ".cache" / "watermark_models"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-
-        model_file = cache_dir / "yolo11x_watermark.pt"
-
-        if model_file.exists():
-            return str(model_file)
-
-        logger.info("📥 Downloading model from HuggingFace...")
-        logger.info(f"   Repository: {self.model_path}")
-
-        try:
-            downloaded_path = hf_hub_download(repo_id=self.model_path, filename="best.pt", cache_dir=str(cache_dir))
-
-            import shutil
-
-            shutil.copy(downloaded_path, model_file)
-
-            logger.info(f"✅ Model downloaded: {model_file}")
-            return str(model_file)
-
-        except Exception as e:
-            logger.error(f"❌ Failed to download model: {e}")
-            raise
-
     def _load_yolo(self):
         """加载 YOLO 模型"""
         if self.yolo is not None:
@@ -107,16 +79,14 @@ class WatermarkRemover:
 
         logger.info("📥 Loading YOLO model...")
 
-        # 判断是本地文件还是 HuggingFace ID
         model_path = Path(self.model_path)
         if model_path.exists():
-            # 本地文件
             model_file = str(model_path)
-        elif "/" in self.model_path:
-            # HuggingFace ID
-            model_file = self._download_model_from_hf()
         else:
-            raise ValueError(f"Invalid model path: {self.model_path}")
+            raise FileNotFoundError(
+                f"YOLO watermark model not found: {self.model_path}. "
+                "Please mount/download models under backend/model before startup."
+            )
 
         self.yolo = YOLO(model_file)
         logger.info("✅ YOLO loaded")

@@ -16,6 +16,7 @@ import signal
 import sys
 import time
 import os
+import json
 from loguru import logger
 from pathlib import Path
 import argparse
@@ -23,12 +24,68 @@ from utils import parse_list_arg
 from dotenv import load_dotenv
 
 
+def configure_local_models():
+    """配置本地模型路径（原生开发：直接使用 backend/model 下的模型，不联网下载）。
+
+    各引擎在代码中的默认值指向的是容器路径（SenseVoice/Paraformer/水印 YOLO -> MODEL_PATH
+    默认 /app/models；PaddleOCR-VL -> PADDLEX_HOME 默认 /root/.paddlex；MinerU -> ~/mineru.json，
+    其内容写死 /app/models/...）。这些路径在 Mac/原生环境并不存在，导致启动即报“本地模型缺失”。
+
+    这里在拉起子进程之前，按仓库内 backend/model 的实际位置注入对应环境变量，让全部引擎都走
+    本地模型；同时为 MinerU 生成一份带宿主机绝对路径的配置文件并指向它。
+    - 仅在用户未显式设置对应变量时生效（setdefault），保留覆盖能力。
+    - Docker 不经过本脚本（各服务有独立 command + entrypoint），因此不受影响。
+    """
+    model_root = (Path(__file__).parent / "model").resolve()
+    if not model_root.exists():
+        logger.warning(f"⚠️  本地模型目录不存在: {model_root}，将沿用各引擎默认路径")
+        return
+
+    # SenseVoice / Paraformer / 水印 YOLO 统一读 MODEL_PATH
+    os.environ.setdefault("MODEL_PATH", str(model_root))
+    # PaddleOCR-VL 读 PADDLEX_HOME，本地模型在 paddlex_cache/official_models 下
+    os.environ.setdefault("PADDLEX_HOME", str(model_root / "paddlex_cache"))
+
+    # MinerU 本地模式：生成带宿主机绝对路径的配置文件并指向它
+    # （仓库内自带的 mineru.json 写死了 /app/models/...，仅供 Docker 使用）
+    if "MINERU_TOOLS_CONFIG_JSON" not in os.environ:
+        config_path = model_root / "mineru.local.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "models-dir": {
+                        # MinerU 3.0 pipeline 的相对路径常量本身已含 "models/"
+                        # （如 models/MFR/unimernet_hf_small_2503），因此根目录到
+                        # PDF-Extract-Kit-1.0 即可，不能再带 /models，否则会拼成 models/models/。
+                        "pipeline": str(model_root / "PDF-Extract-Kit-1.0"),
+                        "vlm": str(model_root / "MinerU2.5-Pro-2605-1.2B"),
+                    },
+                    "config_version": "1.3.1",
+                },
+                ensure_ascii=False,
+                indent=4,
+            ),
+            encoding="utf-8",
+        )
+        os.environ["MINERU_TOOLS_CONFIG_JSON"] = str(config_path)
+
+    logger.info("📦 本地模型环境已配置 (backend/model)，启动不会联网下载:")
+    logger.info(f"   MODEL_PATH               = {os.environ['MODEL_PATH']}")
+    logger.info(f"   PADDLEX_HOME             = {os.environ['PADDLEX_HOME']}")
+    logger.info(f"   MINERU_TOOLS_CONFIG_JSON = {os.environ.get('MINERU_TOOLS_CONFIG_JSON')}")
+    if os.getenv("MODEL_DOWNLOAD_SOURCE", "").lower() != "local":
+        logger.warning(
+            "⚠️  MODEL_DOWNLOAD_SOURCE 当前不是 'local'，MinerU 可能仍会尝试联网下载；"
+            "建议在 backend/.env 中设置 MODEL_DOWNLOAD_SOURCE=local"
+        )
+
+
 class TianshuLauncher:
     """天枢服务启动器"""
 
     def __init__(
         self,
-        output_dir="/tmp/mineru_tianshu_output",
+        output_dir="./mineru_tianshu_output",
         api_port=8000,
         worker_port=8001,
         workers_per_device=1,
@@ -61,18 +118,16 @@ class TianshuLauncher:
                 from paddleocr_vl import PaddleOCRVLEngine
 
                 logger.info("🔍 Checking PaddleOCR-VL...")
-                logger.info("   Note: PaddleOCR-VL models are auto-managed by PaddleOCR")
-                logger.info("   Cache location: ~/.paddleocr/models/")
-                logger.info("   Model will be auto-downloaded on first use (~2GB)")
+                logger.info("   Note: 使用本地模型，不会联网下载")
 
-                # 检查 home 目录的模型缓存
-                home_dir = Path.home()
-                model_cache_dir = home_dir / ".paddleocr" / "models"
+                # 检查本地模型缓存（PADDLEX_HOME/official_models）
+                pdx_home = Path(os.getenv("PADDLEX_HOME", "/root/.paddlex"))
+                model_cache_dir = pdx_home / "official_models"
 
                 if model_cache_dir.exists():
                     logger.info(f"✅ PaddleOCR model cache found at: {model_cache_dir}")
                 else:
-                    logger.info("ℹ️  PaddleOCR model cache not found, will be created on first use")
+                    logger.warning(f"⚠️  PaddleOCR model cache not found at: {model_cache_dir}")
 
                 # 简单初始化引擎（不触发下载）
                 try:
@@ -286,12 +341,17 @@ def main():
     """主函数"""
     env_path = Path(__file__).parent / ".env"
     if env_path.exists():
-        load_dotenv(dotenv_path=env_path)
+        # override=True: 让 .env 成为权威配置，覆盖 shell 中可能残留的同名变量
+        # （例如残留的 Docker 路径 DATABASE_PATH=/app/...，本地原生运行会因 /app 只读而崩溃）
+        load_dotenv(dotenv_path=env_path, override=True)
         logger.info(f"✅ Loaded .env from: {env_path}")
     else:
         logger.error(f"❌ .env file not found at: {env_path}")
         logger.error("Please create a .env file in the backend directory with required environment variables")
         sys.exit(1)
+
+    # 注入本地模型路径（原生开发：使用 backend/model 下的模型，须在 .env 之后、子进程之前执行）
+    configure_local_models()
     parser = argparse.ArgumentParser(
         description="MinerU Tianshu - 统一启动脚本",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -320,8 +380,8 @@ def main():
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="/tmp/mineru_tianshu_output",
-        help="输出目录 (默认: /tmp/mineru_tianshu_output)",
+        default="./mineru_tianshu_output",
+        help="输出目录 (默认: ./mineru_tianshu_output)",
     )
     parser.add_argument("--api-port", type=int, default=8000, help="API服务器端口 (默认: 8000)")
     parser.add_argument("--worker-port", type=int, default=8001, help="Worker服务器端口 (默认: 8001)")
@@ -353,6 +413,11 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # 统一为绝对路径：OUTPUT_PATH 会被 resolve() 成绝对路径，若 output_dir 为相对路径，
+    # 存入数据库的 result_path 会是相对路径，导致 API 端 relative_to(OUTPUT_DIR) 失配、
+    # 预览 PDF 链接丢失。这里提前 resolve，保证 worker 写入与 API 读取路径一致。
+    args.output_dir = str(Path(args.output_dir).resolve())
 
     # 处理 devices 参数
     devices = args.devices

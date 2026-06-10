@@ -266,8 +266,11 @@ class MinerUWorkerAPI(ls.LitAPI):
             logger.info(f"🎯 [GPU Isolation] Set CUDA_VISIBLE_DEVICES={gpu_id}")
 
         # 配置模型源
-        model_source = os.getenv("MODEL_DOWNLOAD_SOURCE", "auto").lower()
-        if model_source in ["modelscope", "auto"]:
+        model_source = os.getenv("MODEL_DOWNLOAD_SOURCE", "local").lower()
+        if model_source == "local":
+            os.environ["MINERU_MODEL_SOURCE"] = "local"
+            logger.info("📦 Using local models only (MODEL_DOWNLOAD_SOURCE=local)")
+        elif model_source in ["modelscope", "auto"]:
             try:
                 importlib.util.find_spec("modelscope")
                 os.environ["MINERU_MODEL_SOURCE"] = "modelscope"
@@ -632,7 +635,7 @@ class MinerUWorkerAPI(ls.LitAPI):
         if self.paddleocr_vl_engine is None:
             from paddleocr_vl import PaddleOCRVLEngine
 
-            self.paddleocr_vl_engine = PaddleOCRVLEngine(device="cuda:0", model_name="PaddleOCR-VL-1.5")
+            self.paddleocr_vl_engine = PaddleOCRVLEngine(device="cuda:0", model_name="PaddleOCR-VL-1.6")
 
         output_dir = Path(self.output_dir) / Path(file_path).stem
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -657,7 +660,7 @@ class MinerUWorkerAPI(ls.LitAPI):
             from paddleocr_vl_vllm import PaddleOCRVLVLLMEngine
 
             self.paddleocr_vl_vllm_engine = PaddleOCRVLVLLMEngine(
-                device="cuda:0", vllm_api_base=self.paddleocr_vl_vllm_api, model_name="PaddleOCR-VL-1.5-0.9B"
+                device="cuda:0", vllm_api_base=self.paddleocr_vl_vllm_api, model_name="PaddleOCR-VL-1.6-0.9B"
             )
 
         output_dir = Path(self.output_dir) / Path(file_path).stem
