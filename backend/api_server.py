@@ -461,7 +461,10 @@ async def get_task_status(
 
                     if preview_pdf:
                         try:
-                            rel_path = preview_pdf.relative_to(OUTPUT_DIR)
+                            # preview_pdf 可能是相对路径（取决于 result_path 存储形式），
+                            # 先 resolve 成绝对路径再与绝对的 OUTPUT_DIR 求相对，避免
+                            # relative_to 因相对/绝对不一致抛 ValueError 导致预览 PDF 丢失。
+                            rel_path = preview_pdf.resolve().relative_to(OUTPUT_DIR)
                             encoded_path = quote(str(rel_path).replace("\\", "/"), safe="/")
                             response["data"]["pdf_path"] = encoded_path
                         except ValueError:
