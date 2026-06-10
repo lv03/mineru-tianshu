@@ -63,3 +63,4 @@ models-offline
 cpu-deployment
 backend/model
 input
+.gstack/

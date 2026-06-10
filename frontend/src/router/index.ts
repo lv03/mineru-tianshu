@@ -79,7 +79,9 @@ const router = createRouter({
           path: 'api-docs',
           name: 'api-docs',
           component: () => import('@/views/ApiDocsScalar.vue'),
-          meta: { title: 'API 文档' }
+          // Scalar 卸载时会自行拆除 DOM,与 AppLayout 的 out-in 过渡冲突导致后续路由空白,
+          // 故对该页禁用过渡(详见 AppLayout.vue 的 router-view)
+          meta: { title: 'API 文档', noTransition: true }
         }
       ]
     },

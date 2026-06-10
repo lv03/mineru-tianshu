@@ -64,6 +64,10 @@ class NginxPathRewriteMiddleware:
     def __init__(self, app: ASGIApp):
         self.app = app
 
+    # FastAPI 默认在根路径暴露这些文档端点；前端始终以 /api/ 前缀访问，
+    # Nginx 会剥离 /api/（生产可用），但 Vite 开发代理不剥离 → 需在此剥离。
+    _DOC_PATHS = ("/api/openapi.json", "/api/docs", "/api/redoc")
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] in ("http", "websocket"):
             path = scope.get("path", "")
@@ -73,6 +77,11 @@ class NginxPathRewriteMiddleware:
                 # 某些底层组件匹配强依赖 raw_path，也一并修改
                 if "raw_path" in scope:
                     scope["raw_path"] = b"/api" + scope["raw_path"]
+            # 文档端点：开发模式下 Vite 不剥离 /api，这里剥离以命中根路径的 /openapi.json 等
+            elif path in self._DOC_PATHS:
+                scope["path"] = path[len("/api"):]
+                if "raw_path" in scope:
+                    scope["raw_path"] = scope["raw_path"][len(b"/api"):]
         await self.app(scope, receive, send)
 
 

@@ -306,10 +306,16 @@
 
     <!-- 主内容区域 -->
     <main class="w-full px-4 sm:px-6 lg:px-8 xl:px-12 py-6 lg:py-10 max-w-[1920px] mx-auto">
-      <router-view v-slot="{ Component }">
-        <transition name="fade" mode="out-in">
+      <router-view v-slot="{ Component, route }">
+        <!--
+          API 文档页(Scalar)在卸载时会自行拆除/移动 DOM(并向 body 注入 tooltip),
+          导致 mode="out-in" 依赖的 transitionend 永不触发,过渡卡在 leaving 状态,
+          之后所有路由都渲染为空占位符。对该页禁用过渡以规避此问题。
+        -->
+        <transition v-if="!route.meta.noTransition" name="fade" mode="out-in">
           <component :is="Component" />
         </transition>
+        <component v-else :is="Component" />
       </router-view>
     </main>
 
