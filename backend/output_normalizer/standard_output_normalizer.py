@@ -175,15 +175,40 @@ class StandardOutputNormalizer(BaseOutputNormalizer):
             logger.info(f"✅ Standard JSON file already exists: {standard_json.name}")
             return standard_json
 
-        # 选择主 JSON 文件（优先选择 content_list.json 或最大的文件）
-        main_json = None
-        for f in json_files:
-            if "content_list" in f.name or "result" in f.name:
-                main_json = f
-                break
+        # 选择主 JSON 文件
+        # ⚠️ MinerU pipeline 引擎会产出多个同前缀(result.pdf_*)文件：
+        #    - *_model.json  : 仅版面检测框(cls_id/label/score/bbox)，无文字 —— 不可用于展示
+        #    - *_middle.json : 中间结果 —— 不可用于展示
+        #    - *_content_list_v2.json / *_content_list.json : 含文字的结构化内容 —— 展示所需
+        # 旧逻辑 `"result" in f.name` 会匹配到上述全部文件并取 rglob 第一个，
+        # 常常误选 model.json，导致前端“双向定位”出现一排无文字空框。
+        # 这里改为按优先级显式打分：content_list_v2 > content_list > content/result，
+        # 并彻底排除 model/middle。
+        def _json_priority(f: Path) -> int:
+            name = f.name.lower()
+            if name.endswith("_model.json") or name.endswith("_middle.json"):
+                return -1  # 排除：仅含版面/中间数据，无可展示文字
+            if "content_list_v2" in name:
+                return 4
+            if "content_list" in name:
+                return 3
+            if name in ("content.json", "result.json"):
+                return 2
+            if "result" in name:
+                return 1
+            return 0
 
-        if not main_json:
-            main_json = max(json_files, key=lambda f: f.stat().st_size)
+        candidates = [f for f in json_files if _json_priority(f) > 0]
+        if candidates:
+            main_json = max(candidates, key=_json_priority)
+        else:
+            # 没有内容列表时，退而取最大的非 model/middle 文件
+            usable = [f for f in json_files if _json_priority(f) >= 0]
+            main_json = max(usable, key=lambda f: f.stat().st_size) if usable else None
+
+        if main_json is None:
+            logger.warning("⚠️  No usable content JSON found (only model/middle outputs)")
+            return None
 
         logger.info(f"📄 Found main JSON: {main_json.relative_to(output_dir)}")
 
