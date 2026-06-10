@@ -26,24 +26,24 @@ services:
       - tianshu-network
 
   # ============================================================================
-  # RustFS (对象存储)
+  # MinIO (对象存储)
   # ============================================================================
-  rustfs:
-    image: rustfs/rustfs:latest
-    container_name: tianshu-rustfs
+  minio:
+    image: minio/minio:latest
+    container_name: tianshu-minio
     restart: unless-stopped
     ports:
-      - "${RUSTFS_PORT:-9000}:9000"
-      - "${RUSTFS_CONSOLE_PORT:-9001}:9001"
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
-      - rustfs-data:/data
-      - rustfs-logs:/logs
+      - minio-data:/data
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
     environment:
       - TZ=Asia/Shanghai
-      - RUSTFS_ROOT_USER=${RUSTFS_ACCESS_KEY:-rustfsadmin}
-      - RUSTFS_ROOT_PASSWORD=${RUSTFS_SECRET_KEY:-rustfsadmin}
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-minioadmin}
+    command: server /data --console-address ":9001"
     networks:
       - tianshu-network
 
@@ -53,16 +53,18 @@ services:
   init-models:
     image: tianshu-backend:latest
     container_name: tianshu-init-models
+    profiles:
+      - download-models
     entrypoint: ["python", "download_models.py", "--output", "/app/models"]
     volumes:
-      - ./models:/app/models:rw
-      - ./models/paddlex_cache:/root/.paddlex:rw
-      - ./models/paddleocr_cache:/root/.paddleocr:rw
+      - ./backend/model:/app/models:rw
+      - ./backend/model/paddlex_cache:/root/.paddlex:rw
+      - ./backend/model/paddleocr_cache:/root/.paddleocr:rw
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
     environment:
       - TZ=Asia/Shanghai
-      - MODEL_DOWNLOAD_SOURCE=${MODEL_DOWNLOAD_SOURCE:-auto}
+      - MODEL_DOWNLOAD_SOURCE=${MODEL_DOWNLOAD_SOURCE:-local}
       - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
     networks:
       - tianshu-network
@@ -84,9 +86,9 @@ services:
       - "${API_PORT:-8000}:8000"
     volumes:
       - ./backend:/app/backend:rw
-      - ./models:/app/models:rw
-      - ./models/paddlex_cache:/root/.paddlex:rw
-      - ./models/paddleocr_cache:/root/.paddleocr:rw
+      - ./backend/model:/app/models:rw
+      - ./backend/model/paddlex_cache:/root/.paddlex:rw
+      - ./backend/model/paddleocr_cache:/root/.paddleocr:rw
       - ./input:/app/data/uploads:rw
       - ./output:/app/data/output:rw
       - ./logs/backend:/app/logs:rw
@@ -105,13 +107,13 @@ services:
       - OUTPUT_PATH=/app/data/output
       - UPLOAD_PATH=/app/data/uploads
       - DATABASE_PATH=${DATABASE_PATH:-/app/data/db/mineru_tianshu.db}
-      - RUSTFS_ENABLED=${RUSTFS_ENABLED:-true}
-      - RUSTFS_ENDPOINT=${RUSTFS_ENDPOINT:-rustfs:9000}
-      - RUSTFS_ACCESS_KEY=${RUSTFS_ACCESS_KEY:-rustfsadmin}
-      - RUSTFS_SECRET_KEY=${RUSTFS_SECRET_KEY:-rustfsadmin}
-      - RUSTFS_BUCKET=${RUSTFS_BUCKET:-ts-img}
-      - RUSTFS_PUBLIC_URL=${RUSTFS_PUBLIC_URL}
-      - MODEL_DOWNLOAD_SOURCE=${MODEL_DOWNLOAD_SOURCE:-auto}
+      - MINIO_ENABLED=${MINIO_ENABLED:-true}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-minio:9000}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+      - MINIO_BUCKET=${MINIO_BUCKET:-ts-img}
+      - MINIO_PUBLIC_URL=${MINIO_PUBLIC_URL}
+      - MODEL_DOWNLOAD_SOURCE=${MODEL_DOWNLOAD_SOURCE:-local}
       - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
     deploy:
       resources:
@@ -123,10 +125,8 @@ services:
     networks:
       - tianshu-network
     depends_on:
-      rustfs:
+      minio:
         condition: service_started
-      init-models:
-        condition: service_completed_successfully
 
   # ============================================================================
   # Task Scheduler (任务调度与清理)
@@ -163,8 +163,8 @@ services:
     ports:
       - "30023:30023"
     volumes:
-      - ./models:/models:ro
-      - ./models/paddlex_cache:/root/.paddlex:ro
+      - ./backend/model:/models:ro
+      - ./backend/model/paddlex_cache:/root/.paddlex:ro
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
     environment:
@@ -176,8 +176,8 @@ services:
       - PYTHONWARNINGS=ignore
     # ⬇️ [优化] 显存降至 0.6，防止卡顿；限制单次处理 1 张图
     command: >
-      --model /root/.paddlex/official_models/PaddleOCR-VL-1.5-0.9B
-      --served-model-name PaddleOCR-VL-1.5-0.9B
+      --model /root/.paddlex/official_models/PaddleOCR-VL-1.6-0.9B
+      --served-model-name PaddleOCR-VL-1.6-0.9B
       --trust-remote-code
       --host 0.0.0.0
       --port 30023
@@ -196,9 +196,6 @@ services:
               capabilities: [gpu]
     networks:
       - tianshu-network
-    depends_on:
-      init-models:
-        condition: service_completed_successfully
 
   # ============================================================================
   # vLLM Service - MinerU (手动触发，互斥控制)
@@ -211,7 +208,7 @@ services:
     ports:
       - "30024:30024"
     volumes:
-      - ./models:/models:ro
+      - ./backend/model:/models:ro
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
     environment:
@@ -222,7 +219,7 @@ services:
       - PYTHONWARNINGS=ignore
     # ⬇️ [优化] 显存降至 0.6，防止卡顿；限制单次处理 1 张图
     command: >
-      --model /models/MinerU2.5-2509-1.2B
+      --model /models/MinerU2.5-Pro-2605-1.2B
       --served-model-name MinerU-1.2B
       --trust-remote-code
       --host 0.0.0.0
@@ -242,9 +239,6 @@ services:
               capabilities: [gpu]
     networks:
       - tianshu-network
-    depends_on:
-      init-models:
-        condition: service_completed_successfully
 
   # ============================================================================
   # Worker (任务执行者)
@@ -267,9 +261,9 @@ services:
     volumes:
       - ./backend:/app/backend:rw
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./models:/app/models:rw
-      - ./models/paddlex_cache:/root/.paddlex:rw
-      - ./models/paddleocr_cache:/root/.paddleocr:rw
+      - ./backend/model:/app/models:rw
+      - ./backend/model/paddlex_cache:/root/.paddlex:rw
+      - ./backend/model/paddleocr_cache:/root/.paddleocr:rw
       - ./input:/app/data/uploads:rw
       - ./output:/app/data/output:rw
       - ./logs/worker:/app/logs:rw
@@ -296,12 +290,12 @@ services:
       - PDF_SPLIT_ENABLED=${PDF_SPLIT_ENABLED:-true}
       - PDF_SPLIT_THRESHOLD_PAGES=${PDF_SPLIT_THRESHOLD_PAGES:-500}
       - PDF_SPLIT_CHUNK_SIZE=${PDF_SPLIT_CHUNK_SIZE:-500}
-      - RUSTFS_ENABLED=${RUSTFS_ENABLED:-true}
-      - RUSTFS_ENDPOINT=${RUSTFS_ENDPOINT:-rustfs:9000}
-      - RUSTFS_ACCESS_KEY=${RUSTFS_ACCESS_KEY:-rustfsadmin}
-      - RUSTFS_SECRET_KEY=${RUSTFS_SECRET_KEY:-rustfsadmin}
-      - RUSTFS_BUCKET=${RUSTFS_BUCKET:-ts-img}
-      - RUSTFS_PUBLIC_URL=${RUSTFS_PUBLIC_URL}
+      - MINIO_ENABLED=${MINIO_ENABLED:-true}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-minio:9000}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+      - MINIO_BUCKET=${MINIO_BUCKET:-ts-img}
+      - MINIO_PUBLIC_URL=${MINIO_PUBLIC_URL}
       - REDIS_QUEUE_ENABLED=${REDIS_QUEUE_ENABLED:-false}
       - REDIS_HOST=${REDIS_HOST:-redis}
       - REDIS_PORT=${REDIS_PORT:-6379}
@@ -323,12 +317,10 @@ services:
     networks:
       - tianshu-network
     depends_on:
-      rustfs:
+      minio:
         condition: service_started
       backend:
         condition: service_started
-      init-models:
-        condition: service_completed_successfully
 
   # ============================================================================
   # MCP Server
@@ -393,7 +385,5 @@ networks:
 volumes:
   redis-data:
     driver: local
-  rustfs-data:
-    driver: local
-  rustfs-logs:
+  minio-data:
     driver: local

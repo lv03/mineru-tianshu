@@ -83,7 +83,7 @@ initialize_directories() {
 setup_mineru_config() {
     log_info "Setting up MinerU configuration (mineru.json)..."
 
-    # 该文件由 download_models.py 生成到共享卷 /app/models 中
+    # 该文件应来自宿主机挂载的 backend/model/mineru.json。
     CONFIG_SRC="/app/models/mineru.json"
     CONFIG_FILENAME="${MINERU_TOOLS_CONFIG_JSON:-mineru.json}"
     CONFIG_DEST="/root/${CONFIG_FILENAME}"
@@ -92,7 +92,7 @@ setup_mineru_config() {
         cp "$CONFIG_SRC" "${CONFIG_DEST}"
         log_success "mineru.json distributed to ${CONFIG_DEST}"
     else
-        log_warning "$CONFIG_SRC not found. MinerU might use default internal settings."
+        log_warning "$CONFIG_SRC not found. MinerU local model configuration is missing."
     fi
 }
 
@@ -102,21 +102,9 @@ setup_mineru_config() {
 initialize_models() {
     log_info "Initializing models..."
 
-    # 检查是否有外部模型卷挂载
-    if [ -d "/models-external" ]; then
-        # 调用统一的模型初始化脚本
-        INIT_SCRIPT="/usr/local/bin/init-models.sh"
-
-        if [ -f "$INIT_SCRIPT" ]; then
-            log_info "Running model initialization script: $INIT_SCRIPT"
-            bash "$INIT_SCRIPT" || log_warning "Model initialization script failed, continuing..."
-        else
-            log_warning "Model initialization script not found: $INIT_SCRIPT"
-        fi
-    else
-        log_warning "External models directory (/models-external) not found"
-        log_warning "Models will be downloaded on first use"
-    fi
+    MODEL_PATH=${MODEL_PATH:-/app/models}
+    log_info "Using local model directory: $MODEL_PATH"
+    log_info "Model auto-download is disabled in the default startup path."
 }
 
 # ============================================================================
@@ -132,17 +120,23 @@ check_models() {
         mkdir -p "$MODEL_PATH"
     fi
 
-    # Check key models
-    if [ -d "$MODEL_PATH/paddleocr_vl" ]; then
+    # Check key models from backend/model mounted to /app/models.
+    if [ -d "$MODEL_PATH/paddlex_cache/official_models/PaddleOCR-VL-1.6-0.9B" ]; then
         log_success "PaddleOCR-VL model found"
     else
-        log_warning "PaddleOCR-VL model not found, will be automatically downloaded on first run"
+        log_warning "PaddleOCR-VL model not found at $MODEL_PATH/paddlex_cache/official_models/PaddleOCR-VL-1.6-0.9B"
     fi
 
-    if [ -d "$MODEL_PATH/sensevoice" ]; then
+    if [ -d "$MODEL_PATH/SenseVoiceSmall" ]; then
         log_success "SenseVoice model found"
     else
-        log_warning "SenseVoice model not found, audio processing features will be limited"
+        log_warning "SenseVoice model not found at $MODEL_PATH/SenseVoiceSmall"
+    fi
+
+    if [ -d "$MODEL_PATH/PDF-Extract-Kit-1.0/models" ] && [ -d "$MODEL_PATH/MinerU2.5-Pro-2605-1.2B" ]; then
+        log_success "MinerU models found"
+    else
+        log_warning "MinerU models not found under $MODEL_PATH"
     fi
 }
 
