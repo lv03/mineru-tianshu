@@ -304,7 +304,10 @@ class VideoProcessingEngine:
 
                     keyframe_result = ocr_engine.process(video_path=str(video_path), output_path=str(output_path))
 
-                    logger.info(f"✅ Extracted {keyframe_result['total_keyframes']} keyframes")
+                    if keyframe_result.get("success"):
+                        logger.info(f"✅ Extracted {keyframe_result.get('total_keyframes', 0)} keyframes")
+                    else:
+                        logger.info(f"ℹ️  No keyframes extracted: {keyframe_result.get('message', 'unknown')}")
 
                 except Exception as e:
                     logger.warning(f"⚠️  Keyframe OCR failed: {e}")
@@ -321,9 +324,12 @@ class VideoProcessingEngine:
             if result.get("json_data"):
                 json_data = result["json_data"]
                 json_data["type"] = "video"
-                json_data["source"]["file_type"] = "video"
-                json_data["source"]["video_format"] = video_path.suffix[1:]
-                json_data["source"]["original_filename"] = video_path.name
+                # 音频引擎产出的 json_data 不含 source 键，这里整体构建视频来源元数据
+                json_data["source"] = {
+                    "file_type": "video",
+                    "video_format": video_path.suffix[1:],
+                    "original_filename": video_path.name,
+                }
 
                 # 添加关键帧OCR结果
                 if keyframe_result and keyframe_result.get("success"):
