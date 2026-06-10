@@ -663,6 +663,29 @@ async def resume_task_endpoint(task_id: str, current_user: User = Depends(get_cu
     raise HTTPException(status_code=409, detail="Task cannot be resumed (must be in paused status)")
 
 
+@router.post("/tasks/{task_id}/cancel", tags=["任务管理"])
+async def cancel_task_endpoint(task_id: str, current_user: User = Depends(get_current_active_user)):
+    """
+    取消任务：将 pending/processing/paused 的任务置为 cancelled，保留数据库记录与文件。
+    与 DELETE /tasks/{task_id}（彻底删除文件与记录）语义不同。
+    """
+    task = db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    if not current_user.has_permission(Permission.TASK_DELETE_ALL):
+        if task.get("user_id") != current_user.user_id:
+            raise HTTPException(status_code=403, detail="Permission denied")
+
+    if db.cancel_task(task_id):
+        return {"success": True, "message": "Task cancelled"}
+
+    raise HTTPException(
+        status_code=409,
+        detail="Task cannot be cancelled (must be in pending, processing or paused status)",
+    )
+
+
 @router.post("/tasks/{task_id}/clear-cache", tags=["任务管理"])
 async def clear_task_cache_endpoint(task_id: str, current_user: User = Depends(get_current_active_user)):
     """

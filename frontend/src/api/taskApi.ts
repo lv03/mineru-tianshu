@@ -103,9 +103,17 @@ export async function getTaskStatus(
 }
 
 /**
- * 取消任务
+ * 取消任务（将 pending/processing/paused 任务置为 cancelled，保留记录与文件）
  */
 export async function cancelTask(taskId: string): Promise<ApiResponse> {
+  const response = await apiClient.post<ApiResponse>(`/api/v1/tasks/${taskId}/cancel`)
+  return response.data
+}
+
+/**
+ * 彻底删除任务（同时物理删除文件与数据库记录，不可恢复）
+ */
+export async function deleteTask(taskId: string): Promise<ApiResponse> {
   const response = await apiClient.delete<ApiResponse>(`/api/v1/tasks/${taskId}`)
   return response.data
 }

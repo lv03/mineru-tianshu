@@ -866,6 +866,23 @@ class TaskDB:
             )
             return cursor.rowcount > 0
 
+    def cancel_task(self, task_id: str) -> bool:
+        """
+        取消任务：将 pending/processing/paused 的任务置为 cancelled，保留数据库记录与文件。
+        已完成（completed/failed/cancelled）的任务不受影响。
+        """
+        with self.get_cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE tasks
+                SET status = 'cancelled',
+                    completed_at = CURRENT_TIMESTAMP
+                WHERE task_id = ? AND status IN ('pending', 'processing', 'paused')
+                """,
+                (task_id,),
+            )
+            return cursor.rowcount > 0
+
     def clear_task_cache(self, task_id: str) -> bool:
         """
         清理任务缓存：保留数据库历史记录，但将 result_path 标记为已清理
