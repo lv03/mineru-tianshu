@@ -408,17 +408,27 @@ class MinerUWorkerAPI(ls.LitAPI):
 
             file_ext = Path(file_path).suffix.lower()
 
-            # 2. 预处理
-            if file_ext in [".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt"] and options.get(
-                "convert_office_to_pdf", False
-            ):
-                try:
-                    pdf_path = self._convert_office_to_pdf(file_path)
-                    file_path = pdf_path
-                    file_ext = ".pdf"
-                    logger.info(f"✅ Office converted to PDF: {pdf_path}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Office conversion failed, falling back: {e}")
+            # 2. 预处理：Office 文档归一化
+            # 勾选「Office 转 PDF 深度解析」时用 LibreOffice 先转 PDF，可完整保留排版/图表，
+            # 并让 MinerU/PaddleOCR 产出 _layout.pdf + bbox（支持预览与双向定位）。
+            OFFICE_EXTS = (".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt")
+
+            if file_ext in OFFICE_EXTS and options.get("convert_office_to_pdf", False):
+                # 转换失败直接抛错，不再静默回退到原文件（否则又会在 pdfium 处崩溃）
+                pdf_path = self._convert_office_to_pdf(file_path)
+                file_path = pdf_path
+                file_ext = ".pdf"
+                logger.info(f"✅ Office converted to PDF: {pdf_path}")
+
+            elif file_ext in OFFICE_EXTS:
+                # 未勾选转换时的兜底校验：MinerU 仅能原生解析 .docx，PaddleOCR-VL 完全不支持 Office。
+                # 直接送进去会被 pdfium 当 PDF 打开而报难懂的 "Data format error"，故提前给出可操作提示。
+                is_mineru_backend = "pipeline" in backend or "vlm-" in backend or "hybrid-" in backend
+                is_paddle_backend = backend in ("paddleocr-vl", "paddleocr-vl-vllm")
+                if is_paddle_backend or (is_mineru_backend and file_ext != ".docx"):
+                    raise ValueError(
+                        f"{backend} 引擎无法直接解析 {file_ext} 文件，请在提交时勾选「Office 转 PDF 深度解析」后重试。"
+                    )
 
             # 3. PDF 拆分
             if file_ext == ".pdf" and not parent_task_id:
@@ -779,6 +789,38 @@ class MinerUWorkerAPI(ls.LitAPI):
     # -------------------------------------------------------------------------
     # Utilities
     # -------------------------------------------------------------------------
+    def _resolve_soffice(self) -> str:
+        """定位 LibreOffice/soffice 可执行文件。
+
+        优先级：环境变量 LIBREOFFICE_PATH → PATH 中的 soffice/libreoffice →
+        各平台常见安装路径（含 Mac .app 内部二进制、Homebrew、Linux）。
+        找不到时抛出可读错误，提示安装方式。
+        """
+        env_path = os.getenv("LIBREOFFICE_PATH")
+        if env_path and Path(env_path).exists():
+            return env_path
+
+        for name in ("soffice", "libreoffice"):
+            found = shutil.which(name)
+            if found:
+                return found
+
+        candidates = [
+            "/Applications/LibreOffice.app/Contents/MacOS/soffice",  # macOS
+            "/opt/homebrew/bin/soffice",  # Apple Silicon Homebrew
+            "/usr/local/bin/soffice",  # Intel Homebrew
+            "/usr/bin/soffice",  # Linux
+            "/usr/bin/libreoffice",  # Linux
+        ]
+        for c in candidates:
+            if Path(c).exists():
+                return c
+
+        raise RuntimeError(
+            "未找到 LibreOffice。Office 转换需要它：macOS 执行 `brew install --cask libreoffice`，"
+            "Linux 执行 `apt-get install libreoffice`；或设置环境变量 LIBREOFFICE_PATH 指向 soffice 可执行文件。"
+        )
+
     def _convert_office_to_pdf(self, file_path: str) -> str:
         input_file = Path(file_path)
         final_pdf = input_file.parent / f"{input_file.stem}.pdf"
@@ -791,7 +833,7 @@ class MinerUWorkerAPI(ls.LitAPI):
                 temp_input = temp_path / input_file.name
                 shutil.copy2(input_file, temp_input)
 
-                cmd = ["libreoffice", "--headless", "--convert-to", "pdf", "--outdir", str(temp_path), str(temp_input)]
+                cmd = [self._resolve_soffice(), "--headless", "--convert-to", "pdf", "--outdir", str(temp_path), str(temp_input)]
                 subprocess.run(cmd, check=True, timeout=120, capture_output=True)
 
                 temp_pdf = temp_path / f"{input_file.stem}.pdf"
@@ -823,7 +865,7 @@ class MinerUWorkerAPI(ls.LitAPI):
                 shutil.copy2(input_file, temp_input)
 
                 cmd = [
-                    "libreoffice",
+                    self._resolve_soffice(),
                     "--headless",
                     "--convert-to",
                     target_fmt,
