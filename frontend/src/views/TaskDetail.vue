@@ -196,8 +196,11 @@ const layoutData = computed(() => {
   if (Array.isArray(jsonContent)) {
       if (jsonContent.length > 0 && Array.isArray(jsonContent[0])) {
           // MinerU content_list_v2.json: 外层按页分组的嵌套数组 [[page0_blocks], [page1_blocks], ...]
+          // ⚠️ MinerU 3.0(pipeline 与 vlm 一致) 的 v2 bbox 已归一化到 [0,1000] 逐轴坐标：
+          //    x = x*1000/page_width, y = y*1000/page_height（x、y 独立，不保持纵横比）。
+          //    因此参考宽/高恒为 1000，由 VirtualPdfViewer 用独立 x/y scale 还原。
           flatBlocks = (jsonContent as any[][]).flatMap((page: any[], pIdx: number) =>
-              page.map((b: any, i: number) => ({ ...b, _page_idx: pIdx, _idx: i }))
+              page.map((b: any, i: number) => ({ ...b, _page_idx: pIdx, _idx: i, _page_width: 1000, _page_height: 1000 }))
           )
       } else if (jsonContent.length > 0 && (jsonContent[0].parsing_res_list || jsonContent[0].blocks)) {
           // 按页分组的对象格式
@@ -235,7 +238,8 @@ const layoutData = computed(() => {
           text: extractV2Text(b),
           type: b.type ?? b.block_label ?? 'text',
           order: b.order ?? b.block_order ?? null,
-          _page_width: b._page_width ?? null
+          _page_width: b._page_width ?? null,
+          _page_height: b._page_height ?? null
       }
   })
 

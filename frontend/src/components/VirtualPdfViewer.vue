@@ -136,15 +136,29 @@ const mineruPageWidths = computed(() => {
   return widths
 })
 
-// 智能换算比例：优先用显式 _page_width，其次从 bbox 推断渲染宽度，最后 fallback 到 globalScale
+// 智能换算比例（x/y 独立）：
+// - MinerU content_list_v2：bbox 已归一化到 [0,1000] 逐轴坐标，前端会注入
+//   _page_width=_page_height=1000，此处据此得到 sx=page.width/1000、sy=page.height/1000。
+//   由于归一化按各轴独立进行（不保持纵横比），x 与 y 的比例不同，必须分开换算。
+// - 其它(如 PaddleOCR-VL 像素坐标)：用显式 _page_width，否则从 bbox 推断渲染宽度；
+//   这类坐标保持纵横比，y 沿用 x 的比例即可。
 const pageOcrScales = computed(() => {
-  const scales: Record<number, number> = {}
+  const scales: Record<number, { sx: number; sy: number }> = {}
   for (const page of pages.value) {
-    const providedWidth = layoutMap.value[page.id]?.[0]?._page_width
-    if (providedWidth) { scales[page.id] = page.width / providedWidth; continue }
-    const inferredWidth = mineruPageWidths.value[page.id]
-    if (inferredWidth > 0) { scales[page.id] = page.width / inferredWidth; continue }
-    scales[page.id] = globalScale.value
+    const b0 = layoutMap.value[page.id]?.[0]
+    const providedWidth = b0?._page_width
+    const providedHeight = b0?._page_height
+
+    let sx: number
+    if (providedWidth) {
+      sx = page.width / providedWidth
+    } else {
+      const inferredWidth = mineruPageWidths.value[page.id]
+      sx = inferredWidth > 0 ? page.width / inferredWidth : globalScale.value
+    }
+
+    const sy = providedHeight ? page.height / providedHeight : sx
+    scales[page.id] = { sx, sy }
   }
   return scales
 })
@@ -162,13 +176,14 @@ const getBlockStyle = (pageId: number, bbox: any) => {
     x0 = Math.min(...xs); y0 = Math.min(...ys); x1 = Math.max(...xs); y1 = Math.max(...ys);
   } else { return { display: 'none' } }
 
-  const s = pageOcrScales.value[pageId] || globalScale.value;
+  const sc = pageOcrScales.value[pageId] || { sx: globalScale.value, sy: globalScale.value };
+  const sx = sc.sx, sy = sc.sy;
 
   return {
-    left: `${x0 * s}px`,
-    top: `${y0 * s}px`,
-    width: `${Math.max((x1 - x0) * s, 6)}px`,
-    height: `${Math.max((y1 - y0) * s, 6)}px`
+    left: `${x0 * sx}px`,
+    top: `${y0 * sy}px`,
+    width: `${Math.max((x1 - x0) * sx, 6)}px`,
+    height: `${Math.max((y1 - y0) * sy, 6)}px`
   }
 }
 
@@ -343,8 +358,8 @@ const highlightBlock = (pageIndex: number, bbox: any) => {
     if (bbox && bbox.length === 4) {
       blockY = typeof bbox[0] === 'number' ? bbox[1] : Math.min(...bbox.map((p:any)=>p[1]))
     }
-    const s = pageOcrScales.value[pageIndex] || globalScale.value;
-    const targetScroll = pageNode.top + (blockY * s) - (containerHeight.value / 3)
+    const sc = pageOcrScales.value[pageIndex] || { sx: globalScale.value, sy: globalScale.value };
+    const targetScroll = pageNode.top + (blockY * sc.sy) - (containerHeight.value / 3)
 
     scrollContainer.value.scrollTo({ top: Math.max(0, targetScroll), behavior: 'smooth' })
 
