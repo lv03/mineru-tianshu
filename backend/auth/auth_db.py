@@ -45,12 +45,21 @@ class AuthDB:
             # 确保使用绝对路径
             db_path = str(Path(db_path).resolve())
         self.db_path = db_path
+        # 确保父目录存在（与 TaskDB 一致，避免 data/db 缺失时 sqlite 报 unable to open）
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def _get_conn(self):
         """获取数据库连接"""
         conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30.0)
         conn.row_factory = sqlite3.Row
+        # 与 TaskDB 共用同一数据库文件：busy_timeout 为每连接设置，须一并应用，避免锁等待立即报错
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.Error as e:
+            logger.warning(f"⚠️ Failed to apply SQLite PRAGMA: {e}")
         return conn
 
     @contextmanager
@@ -89,6 +98,7 @@ class AuthDB:
                     is_sso BOOLEAN DEFAULT 0,
                     sso_provider TEXT,
                     sso_subject TEXT,
+                    must_change_password BOOLEAN DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_login TIMESTAMP
                 )
@@ -126,24 +136,31 @@ class AuthDB:
                 # 字段已存在，忽略
                 pass
 
+            # 为旧库补充 must_change_password 字段（如果不存在）
+            try:
+                cursor.execute("ALTER TABLE users ADD COLUMN must_change_password BOOLEAN DEFAULT 0")
+                logger.info("✅ Added must_change_password column to users table")
+            except sqlite3.OperationalError:
+                pass
+
             # 创建默认管理员账户 (如果不存在)
             cursor.execute("SELECT COUNT(*) as count FROM users WHERE role = 'admin'")
             admin_count = cursor.fetchone()["count"]
 
             if admin_count == 0:
                 admin_id = str(uuid.uuid4())
-                admin_password = "admin123"  # 默认密码，生产环境应该修改
+                admin_password = "admin123"  # 默认密码，首登后强制修改
                 password_hash = self._hash_password(admin_password)
 
                 cursor.execute(
                     """
-                    INSERT INTO users (user_id, username, email, password_hash, full_name, role)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO users (user_id, username, email, password_hash, full_name, role, must_change_password)
+                    VALUES (?, ?, ?, ?, ?, ?, 1)
                 """,
                     (admin_id, "admin", "admin@example.com", password_hash, "System Administrator", "admin"),
                 )
                 logger.warning(f"🔐 Created default admin account: admin / {admin_password}")
-                logger.warning("⚠️  Please change the default password immediately!")
+                logger.warning("⚠️  首次登录后将强制要求修改密码！")
 
     @staticmethod
     def _hash_password(password: str) -> str:
@@ -327,9 +344,12 @@ class AuthDB:
             if not password_hash or not self._verify_password(old_password, password_hash):
                 raise ValueError("Incorrect old password")
 
-            # 更新密码
+            # 更新密码（同时清除强制改密标志）
             new_password_hash = self._hash_password(new_password)
-            cursor.execute("UPDATE users SET password_hash = ? WHERE user_id = ?", (new_password_hash, user_id))
+            cursor.execute(
+                "UPDATE users SET password_hash = ?, must_change_password = 0 WHERE user_id = ?",
+                (new_password_hash, user_id),
+            )
 
             return cursor.rowcount > 0
 
@@ -492,6 +512,7 @@ class AuthDB:
             is_sso=bool(row["is_sso"]),
             sso_provider=row["sso_provider"],
             sso_subject=row["sso_subject"],
+            must_change_password=bool(row["must_change_password"]) if "must_change_password" in row.keys() else False,
             created_at=datetime.fromisoformat(row["created_at"]),
             last_login=datetime.fromisoformat(row["last_login"]) if row["last_login"] else None,
         )

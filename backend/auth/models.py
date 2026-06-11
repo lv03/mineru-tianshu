@@ -87,6 +87,7 @@ class User(BaseModel):
     is_sso: bool = False  # 是否通过 SSO 登录
     sso_provider: Optional[str] = None  # SSO 提供者 (oidc/saml)
     sso_subject: Optional[str] = None  # SSO 用户唯一标识
+    must_change_password: bool = False  # 是否必须修改密码（默认管理员首登强制改密）
     created_at: datetime
     last_login: Optional[datetime] = None
 
@@ -141,6 +142,7 @@ class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
     expires_in: int  # 秒
+    must_change_password: bool = False  # 提示前端：登录后须先修改密码
 
 
 class TokenData(BaseModel):

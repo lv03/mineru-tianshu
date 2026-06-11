@@ -81,7 +81,12 @@ async def login(credentials: UserLogin, auth_db: AuthDB = Depends(get_auth_db)):
 
     logger.info(f"✅ User logged in: {user.username}")
 
-    return Token(access_token=access_token, token_type="bearer", expires_in=JWT_EXPIRE_MINUTES * 60)
+    return Token(
+        access_token=access_token,
+        token_type="bearer",
+        expires_in=JWT_EXPIRE_MINUTES * 60,
+        must_change_password=user.must_change_password,
+    )
 
 
 @router.get("/me", response_model=User)
@@ -421,9 +426,11 @@ if OIDC_AVAILABLE:
 
             logger.info(f"✅ SSO user logged in: {user.username} (provider: oidc)")
 
-            # 重定向到前端，携带 token
+            # 重定向到前端：token 放在 URL fragment(#) 而非 query(?)，
+            # fragment 不会发往服务器、不进访问日志/Referer，降低令牌泄露面。
+            # state/CSRF 由 authlib 借助 SessionMiddleware 自动校验。
             frontend_url = request.url_for("root").replace("/api/v1/auth/sso/callback", "")
-            return RedirectResponse(url=f"{frontend_url}?token={access_token}")
+            return RedirectResponse(url=f"{frontend_url}#token={access_token}")
 
         raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="SAML not implemented yet")
 
@@ -543,11 +550,12 @@ async def upload_system_logo(
             tmp_file.write(content)
             tmp_file_path = tmp_file.name
 
-        # 上传到 MinIO (使用 logos/ 前缀)
+        # 上传到 MinIO (logos/ 前缀，公开可读；其余对象一律私有)
         minio = get_minio_client()
         logo_url = minio.upload_file(
             file_path=tmp_file_path,
             object_name=f"logos/logo{file_ext}",  # 固定名称，方便替换
+            public=True,
         )
 
         # 清理临时文件
