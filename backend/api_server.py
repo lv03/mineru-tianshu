@@ -12,7 +12,6 @@ import json
 import os
 import re
 import uuid
-import shutil  # ✅ 用于删除非空目录
 import mimetypes  # ✅ 用于自动识别文件类型
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +20,7 @@ from urllib.parse import quote, unquote
 
 import uvicorn
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Depends, APIRouter
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from loguru import logger
@@ -35,6 +35,7 @@ from auth import (
 )
 from auth.auth_db import AuthDB
 from auth.routes import router as auth_router
+from auth.file_url import build_signed_url, verify_signature
 from task_db import TaskDB
 
 # ✅ [优化] 预注册 MIME 类型，防止精简环境识别失败导致浏览器强制下载
@@ -87,6 +88,12 @@ class NginxPathRewriteMiddleware:
 
 # 必须最先添加此中间件！
 app.add_middleware(NginxPathRewriteMiddleware)
+
+# Session 中间件：authlib OIDC 依赖 session 自动生成/校验 state（CSRF 防护）
+from starlette.middleware.sessions import SessionMiddleware  # noqa: E402
+from auth.jwt_handler import JWT_SECRET_KEY as _SESSION_SECRET  # noqa: E402
+
+app.add_middleware(SessionMiddleware, secret_key=_SESSION_SECRET, same_site="lax", https_only=False)
 
 # 添加 CORS 中间件
 app.add_middleware(
@@ -168,7 +175,8 @@ def process_markdown_images_legacy(md_content: str, image_dir: Path, result_path
             image_path = match.group(2)
             alt_text = "Image"
 
-        if image_path.startswith("http"):
+        if image_path.startswith("http") or "://" in image_path:
+            # 跳过任何带 scheme 的引用（http/https/minio://），避免误把对象引用当本地图片改写
             return full_match
 
         try:
@@ -178,10 +186,8 @@ def process_markdown_images_legacy(md_content: str, image_dir: Path, result_path
 
             if result_path_str.startswith(output_dir_str):
                 relative_path = result_path_str[len(output_dir_str) :].lstrip("/")
-                encoded_relative_path = quote(relative_path, safe="/")
-                encoded_filename = quote(image_filename, safe="/")
-
-                static_url = f"/api/v1/files/output/{encoded_relative_path}/images/{encoded_filename}"
+                # 读时签名：对本地图片 URL 追加 HMAC 签名，浏览器 <img> 可直接访问
+                static_url = build_signed_url("output", f"{relative_path}/images/{image_filename}")
 
                 if "![" in full_match:
                     return f"![{alt_text}]({static_url})"
@@ -201,6 +207,129 @@ def process_markdown_images_legacy(md_content: str, image_dir: Path, result_path
         return new_content
     except Exception:
         return md_content
+
+
+def presign_minio_text(text: str) -> str:
+    """将文本中的 minio://bucket/object 引用替换为 presigned URL（读时生成）。"""
+    if not text or "minio://" not in text:
+        return text
+    try:
+        from storage import get_minio_client
+
+        client = get_minio_client()
+    except Exception as e:
+        logger.warning(f"⚠️ Cannot presign minio refs (client unavailable): {e}")
+        return text
+
+    def _repl(match):
+        return client.presign_reference(match.group(0))
+
+    return re.sub(r"minio://[^\s\"')<>]+", _repl, text)
+
+
+def presign_minio_json(obj):
+    """递归地把 JSON 中的 minio:// 引用替换为 presigned URL。"""
+    try:
+        from storage import get_minio_client
+
+        client = get_minio_client()
+    except Exception:
+        return obj
+
+    def _walk(node):
+        if isinstance(node, dict):
+            return {k: _walk(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [_walk(v) for v in node]
+        if isinstance(node, str) and node.startswith("minio://"):
+            return client.presign_reference(node)
+        return node
+
+    return _walk(obj)
+
+
+def _read_completed_result(result_path: str, fmt: str) -> dict | None:
+    """
+    同步读取已完成任务的结果（rglob + 读文件 + presigned 改写）。
+    抽成纯同步函数，由 get_task_status 经 run_in_threadpool 调用，避免阻塞事件循环。
+    """
+    result_dir = Path(result_path)
+    if not result_dir.exists():
+        logger.error(f"❌ Result directory does not exist: {result_dir}")
+        return None
+
+    md_files = list(result_dir.rglob("*.md"))
+    json_files = [
+        f
+        for f in result_dir.rglob("*.json")
+        if not f.parent.name.startswith("page_")
+        and (f.name in ["content.json", "result.json"] or "_content_list.json" in f.name)
+    ]
+
+    if not (md_files or json_files):
+        return None
+
+    data: dict = {"json_available": len(json_files) > 0}
+
+    pdf_files = list(result_dir.rglob("*.pdf"))
+    preview_pdf = None
+    for pdf in pdf_files:
+        if "_layout.pdf" in pdf.name:
+            preview_pdf = pdf
+            break
+    if not preview_pdf:
+        for pdf in pdf_files:
+            if "_span.pdf" in pdf.name:
+                preview_pdf = pdf
+                break
+    if not preview_pdf:
+        for pdf in pdf_files:
+            if not pdf.name.startswith("page_"):
+                preview_pdf = pdf
+                break
+
+    if preview_pdf:
+        try:
+            # 先 resolve 再与绝对 OUTPUT_DIR 求相对，避免相对/绝对不一致抛 ValueError
+            rel_path = preview_pdf.resolve().relative_to(OUTPUT_DIR)
+            rel_path_str = str(rel_path).replace("\\", "/")
+            data["pdf_path"] = quote(rel_path_str, safe="/")
+            data["pdf_url"] = build_signed_url("output", rel_path_str)
+        except ValueError:
+            pass
+
+    if fmt in ["markdown", "both"] and md_files:
+        md_file = next((f for f in md_files if f.name == "result.md"), md_files[0])
+        image_dir = md_file.parent / "images"
+        with open(md_file, "r", encoding="utf-8") as f:
+            md_content = f.read()
+
+        # 顺序很关键：先把 MinIO 对象引用(minio://)换成 presigned URL，
+        # 再让 legacy 改写「仍为本地相对路径」的图片（legacy 内部跳过任何带 scheme 的引用）。
+        # 否则 legacy 会把 minio:// 误当本地图片改写，生成指向不存在文件的本地 URL 而 404。
+        md_content = presign_minio_text(md_content)
+        if image_dir.exists():
+            md_content = process_markdown_images_legacy(md_content, image_dir, result_path)
+
+        data["markdown_file"] = md_file.name
+        data["content"] = md_content
+        data["has_images"] = image_dir.exists()
+
+    if fmt in ["json", "both"] and json_files:
+        import json as json_lib
+
+        json_file = json_files[0]
+        try:
+            with open(json_file, "r", encoding="utf-8") as f:
+                json_content = json_lib.load(f)
+            data["json_file"] = json_file.name
+            data["json_content"] = presign_minio_json(json_content)
+        except Exception:
+            pass
+    elif fmt == "json" and not json_files:
+        data["message"] = "JSON format not available for this backend"
+
+    return data or None
 
 
 @app.get("/", tags=["系统信息"])
@@ -382,8 +511,8 @@ async def get_task_status(
     if task.get("file_path"):
         try:
             source_filename = Path(task["file_path"]).name
-            encoded_source_filename = quote(source_filename)
-            source_url = f"/api/v1/files/upload/{encoded_source_filename}"
+            # 读时签名：源文件 URL 带 HMAC 签名 + 过期时间
+            source_url = build_signed_url("upload", source_filename)
         except Exception as e:
             logger.warning(f"Failed to generate source_url: {e}")
 
@@ -436,84 +565,12 @@ async def get_task_status(
             response["message"] = "Task completed but result files have been cleaned up"
             return response
 
-        result_dir = Path(task["result_path"])
-        if result_dir.exists():
-            md_files = list(result_dir.rglob("*.md"))
-            json_files = [
-                f
-                for f in result_dir.rglob("*.json")
-                if not f.parent.name.startswith("page_")
-                and (f.name in ["content.json", "result.json"] or "_content_list.json" in f.name)
-            ]
-
-            if md_files or json_files:
-                try:
-                    response["data"] = {}
-                    response["data"]["json_available"] = len(json_files) > 0
-
-                    pdf_files = list(result_dir.rglob("*.pdf"))
-                    preview_pdf = None
-                    for pdf in pdf_files:
-                        if "_layout.pdf" in pdf.name:
-                            preview_pdf = pdf
-                            break
-                    if not preview_pdf:
-                        for pdf in pdf_files:
-                            if "_span.pdf" in pdf.name:
-                                preview_pdf = pdf
-                                break
-                    if not preview_pdf:
-                        for pdf in pdf_files:
-                            if not pdf.name.startswith("page_"):
-                                preview_pdf = pdf
-                                break
-
-                    if preview_pdf:
-                        try:
-                            # preview_pdf 可能是相对路径（取决于 result_path 存储形式），
-                            # 先 resolve 成绝对路径再与绝对的 OUTPUT_DIR 求相对，避免
-                            # relative_to 因相对/绝对不一致抛 ValueError 导致预览 PDF 丢失。
-                            rel_path = preview_pdf.resolve().relative_to(OUTPUT_DIR)
-                            encoded_path = quote(str(rel_path).replace("\\", "/"), safe="/")
-                            response["data"]["pdf_path"] = encoded_path
-                        except ValueError:
-                            pass
-
-                    if format in ["markdown", "both"] and md_files:
-                        md_file = next((f for f in md_files if f.name == "result.md"), md_files[0])
-                        image_dir = md_file.parent / "images"
-                        with open(md_file, "r", encoding="utf-8") as f:
-                            md_content = f.read()
-
-                        if image_dir.exists() and ("http://" not in md_content and "https://" not in md_content):
-                            md_content = process_markdown_images_legacy(md_content, image_dir, task["result_path"])
-
-                        response["data"]["markdown_file"] = md_file.name
-                        response["data"]["content"] = md_content
-                        response["data"]["has_images"] = image_dir.exists()
-
-                    if format in ["json", "both"] and json_files:
-                        import json as json_lib
-
-                        json_file = json_files[0]
-                        try:
-                            with open(json_file, "r", encoding="utf-8") as f:
-                                json_content = json_lib.load(f)
-                            response["data"]["json_file"] = json_file.name
-                            response["data"]["json_content"] = json_content
-                        except Exception:
-                            pass
-                    elif format == "json" and not json_files:
-                        response["data"]["message"] = "JSON format not available for this backend"
-
-                    if not response["data"]:
-                        response["data"] = None
-
-                except Exception as e:
-                    logger.error(f"❌ Failed to read content: {e}")
-                    response["data"] = None
-        else:
-            logger.error(f"❌ Result directory does not exist: {result_dir}")
+        # 读盘 + 解析 + presigned 改写均为同步阻塞操作，放入线程池，避免阻塞事件循环
+        try:
+            response["data"] = await run_in_threadpool(_read_completed_result, task["result_path"], format)
+        except Exception as e:
+            logger.error(f"❌ Failed to read content: {e}")
+            response["data"] = None
 
     return response
 
@@ -539,23 +596,8 @@ async def delete_task(task_id: str, current_user: User = Depends(get_current_act
         if task.get("user_id") != current_user.user_id:
             raise HTTPException(status_code=403, detail="Permission denied: You can only delete your own tasks")
 
-    # 1. 物理删除 Output 文件夹
-    output_dir = OUTPUT_DIR / task_id
-    if output_dir.exists():
-        shutil.rmtree(output_dir, ignore_errors=True)
-
-    # 2. 物理删除 Upload 的源文件
-    if task.get("file_path"):
-        file_path = Path(task["file_path"])
-        if file_path.exists():
-            try:
-                file_path.unlink()
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to delete source file: {e}")
-
-    # 3. 从数据库彻底移除记录
-    with db.get_cursor() as cursor:
-        cursor.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+    # 统一走 TaskDB：按真实 result_path 删除文件 + 移除记录（修正旧的 OUTPUT_DIR/task_id 误删）
+    db.delete_task_completely(task_id)
 
     logger.info(f"🗑️ Task completely deleted: {task_id} by user {current_user.username}")
     return {"success": True, "message": "Task and files completely deleted."}
@@ -564,33 +606,9 @@ async def delete_task(task_id: str, current_user: User = Depends(get_current_act
 @router.delete("/tasks/failed/clear", tags=["任务管理"])
 async def clear_failed_tasks_endpoint(current_user: User = Depends(require_permission(Permission.TASK_DELETE_ALL))):
     """
-    【重构】一键清理所有失败的任务，包含物理清除文件
+    一键清理所有失败的任务，包含物理清除文件（统一走 TaskDB.clear_failed_tasks，按真实 result_path）
     """
-    with db.get_cursor() as cursor:
-        # 获取所有失败的任务信息
-        cursor.execute("SELECT task_id, file_path FROM tasks WHERE status = 'failed'")
-        failed_tasks = [dict(row) for row in cursor.fetchall()]
-
-        deleted_count = 0
-        for task in failed_tasks:
-            t_id = task.get("task_id")
-            f_path = task.get("file_path")
-
-            # 删除 Output 文件夹
-            output_dir = OUTPUT_DIR / t_id
-            if output_dir.exists():
-                shutil.rmtree(output_dir, ignore_errors=True)
-
-            # 删除上传的源文件
-            if f_path and Path(f_path).exists():
-                try:
-                    Path(f_path).unlink()
-                except Exception:
-                    pass
-
-            # 从数据库中彻底删除
-            cursor.execute("DELETE FROM tasks WHERE task_id = ?", (t_id,))
-            deleted_count += 1
+    deleted_count = db.clear_failed_tasks()
 
     logger.info(f"🧹 Cleared {deleted_count} failed tasks from DB and Disk.")
     return {
@@ -620,13 +638,7 @@ async def retry_task(task_id: str, current_user: User = Depends(get_current_acti
             raise HTTPException(status_code=403, detail="Permission denied")
 
     if db.retry_task(task_id):
-        output_dir = OUTPUT_DIR / task_id
-        if output_dir.exists():
-            try:
-                shutil.rmtree(output_dir)
-            except Exception as e:
-                logger.warning(f"Warning: Failed to clean up output directory for retried task {task_id}: {e}")
-
+        # 结果目录清理已在 TaskDB.retry_task 内按真实 result_path 完成
         return {"success": True, "message": "Task submitted for retry"}
 
     raise HTTPException(status_code=404, detail="Task not found")
@@ -698,7 +710,7 @@ async def cancel_task_endpoint(task_id: str, current_user: User = Depends(get_cu
 @router.post("/tasks/{task_id}/clear-cache", tags=["任务管理"])
 async def clear_task_cache_endpoint(task_id: str, current_user: User = Depends(get_current_active_user)):
     """
-    清理任务缓存：仅删除 output 文件夹
+    清理任务缓存：按真实 result_path 删除结果目录（统一走 TaskDB.clear_task_cache）
     """
     task = db.get_task(task_id)
     if not task:
@@ -707,13 +719,6 @@ async def clear_task_cache_endpoint(task_id: str, current_user: User = Depends(g
     if not current_user.has_permission(Permission.TASK_DELETE_ALL):
         if task.get("user_id") != current_user.user_id:
             raise HTTPException(status_code=403, detail="Permission denied")
-
-    output_dir = OUTPUT_DIR / task_id
-    if output_dir.exists():
-        try:
-            shutil.rmtree(output_dir)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to delete files: {str(e)}")
 
     if db.clear_task_cache(task_id):
         return {"success": True, "message": "Task cache cleared, space freed"}
@@ -993,10 +998,15 @@ async def health_check():
 
 
 @router.get("/files/output/{file_path:path}", tags=["文件服务"])
-async def serve_output_file(file_path: str):
-    """提供输出文件的访问服务"""
+async def serve_output_file(file_path: str, exp: str = Query(None), sig: str = Query(None)):
+    """提供输出文件的访问服务（需 HMAC 签名）"""
     try:
         decoded_path = unquote(file_path).lstrip("/")
+
+        # 签名鉴权：替代原先的完全公开访问，防止跨用户拿任意 task 的结果
+        if not verify_signature("output", decoded_path, exp, sig):
+            raise HTTPException(status_code=403, detail="Invalid or expired signature")
+
         full_path = (OUTPUT_DIR / decoded_path).resolve()
 
         logger.debug(f"📥 Serving output file: {full_path}")
@@ -1020,10 +1030,15 @@ async def serve_output_file(file_path: str):
 
 
 @router.get("/files/upload/{file_path:path}", tags=["文件服务"])
-async def serve_upload_file(file_path: str):
-    """提供上传源文件的访问服务"""
+async def serve_upload_file(file_path: str, exp: str = Query(None), sig: str = Query(None)):
+    """提供上传源文件的访问服务（需 HMAC 签名）"""
     try:
         decoded_path = unquote(file_path).lstrip("/")
+
+        # 签名鉴权：替代原先的完全公开访问，防止跨用户下载任意源文件
+        if not verify_signature("upload", decoded_path, exp, sig):
+            raise HTTPException(status_code=403, detail="Invalid or expired signature")
+
         full_path = (UPLOAD_DIR / decoded_path).resolve()
 
         logger.debug(f"📥 Serving upload file: {full_path}")
