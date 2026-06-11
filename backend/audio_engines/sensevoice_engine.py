@@ -49,6 +49,14 @@ class SenseVoiceEngine:
     def _model_root() -> Path:
         return Path(os.getenv("MODEL_PATH", "/app/models"))
 
+    def _local_or_id(self, dirname: str, fallback_id: str) -> str:
+        """
+        优先返回 MODEL_PATH 下的本地模型目录（funasr 见到真实目录不会联网下载）；
+        本地不存在则回退到原别名/ModelScope id（保持按需下载的旧行为，不硬失败）。
+        """
+        p = self._model_root() / dirname
+        return str(p) if p.exists() else fallback_id
+
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
             with cls._lock:
@@ -155,11 +163,16 @@ class SenseVoiceEngine:
                             )
                         self._paraformer_model = AutoModel(
                             model=str(paraformer_dir),
-                            vad_model="fsmn-vad",
+                            vad_model=self._local_or_id("speech_fsmn_vad_zh-cn-16k-common-pytorch", "fsmn-vad"),
                             vad_kwargs={"max_single_segment_time": 30000},
-                            punc_model="ct-punc",  # 标点模型（说话人分离必需）
-                            spk_model="iic/speech_campplus_sv_zh-cn_16k-common",  # 说话人嵌入模型
+                            punc_model=self._local_or_id(
+                                "punc_ct-transformer_cn-en-common-vocab471067-large", "ct-punc"
+                            ),  # 标点模型（说话人分离必需）
+                            spk_model=self._local_or_id(
+                                "speech_campplus_sv_zh-cn_16k-common", "iic/speech_campplus_sv_zh-cn_16k-common"
+                            ),  # 说话人嵌入模型
                             device=self.device,
+                            disable_update=True,  # 关闭 funasr 联网版本检查
                         )
 
                         logger.info("=" * 60)
@@ -191,9 +204,10 @@ class SenseVoiceEngine:
                             model=self.model_dir,
                             trust_remote_code=True,
                             remote_code="./model.py",
-                            vad_model="fsmn-vad",
+                            vad_model=self._local_or_id("speech_fsmn_vad_zh-cn-16k-common-pytorch", "fsmn-vad"),
                             vad_kwargs={"max_single_segment_time": 30000},
                             device=self.device,
+                            disable_update=True,  # 关闭 funasr 联网版本检查
                         )
 
                         logger.info("=" * 60)

@@ -121,6 +121,31 @@ MODELS = {
         "description": "Speaker diarization and VAD model",
         "required": False,
     },
+    # --- 说话人分离辅助模型（VAD/标点/声纹），供 funasr AutoModel 本地加载，避免运行时联网下载 ---
+    "fsmn_vad": {
+        "name": "FSMN VAD (语音端点检测)",
+        "model_id": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+        "source": "modelscope",
+        "target_dir": "speech_fsmn_vad_zh-cn-16k-common-pytorch",
+        "description": "VAD model for SenseVoice/Paraformer (vad_model)",
+        "required": False,
+    },
+    "ct_punc": {
+        "name": "CT-Transformer Punctuation (标点恢复)",
+        "model_id": "iic/punc_ct-transformer_cn-en-common-vocab471067-large",
+        "source": "modelscope",
+        "target_dir": "punc_ct-transformer_cn-en-common-vocab471067-large",
+        "description": "Punctuation model required by speaker diarization (punc_model)",
+        "required": False,
+    },
+    "campplus_sv": {
+        "name": "CAM++ Speaker Embedding (声纹)",
+        "model_id": "iic/speech_campplus_sv_zh-cn_16k-common",
+        "source": "modelscope",
+        "target_dir": "speech_campplus_sv_zh-cn_16k-common",
+        "description": "Speaker embedding model for diarization (spk_model)",
+        "required": False,
+    },
     "yolo11": {
         "name": "YOLO11x Watermark Detection",
         "repo_id": "corzent/yolo11x_watermark_detection",
