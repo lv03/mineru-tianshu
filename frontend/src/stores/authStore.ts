@@ -12,6 +12,7 @@ export const useAuthStore = defineStore('auth', () => {
   const token = ref<string | null>(localStorage.getItem('auth_token'))
   const user = ref<User | null>(null)
   const loading = ref(false)
+  const mustChangePassword = ref(false) // 默认管理员首登须强制改密
 
   // Getters
   const isAuthenticated = computed(() => !!token.value && !!user.value)
@@ -29,6 +30,7 @@ export const useAuthStore = defineStore('auth', () => {
       // 保存 Token
       token.value = response.access_token
       localStorage.setItem('auth_token', response.access_token)
+      mustChangePassword.value = !!response.must_change_password
 
       // 获取用户信息
       await fetchCurrentUser()
@@ -168,6 +170,7 @@ export const useAuthStore = defineStore('auth', () => {
         new_password: newPassword,
       })
       showToast({ message: '密码修改成功', type: 'success' })
+      mustChangePassword.value = false
       return true
     } catch (error: any) {
       console.error('Change password error:', error)
@@ -243,6 +246,18 @@ export const useAuthStore = defineStore('auth', () => {
    * 幂等操作：可以安全地多次调用
    */
   async function initialize() {
+    // SSO 回调：token 通过 URL fragment(#token=...) 传回，读取后落地并清除 hash
+    if (typeof window !== 'undefined' && window.location.hash.includes('token=')) {
+      const params = new URLSearchParams(window.location.hash.slice(1))
+      const ssoToken = params.get('token')
+      if (ssoToken) {
+        token.value = ssoToken
+        localStorage.setItem('auth_token', ssoToken)
+        // 清除 URL 中的 token，避免残留在地址栏/历史
+        history.replaceState(null, '', window.location.pathname + window.location.search)
+      }
+    }
+
     // 如果没有 token 或已经有用户信息，跳过初始化
     if (!token.value || user.value) {
       return
@@ -256,6 +271,7 @@ export const useAuthStore = defineStore('auth', () => {
     token,
     user,
     loading,
+    mustChangePassword,
 
     // Getters
     isAuthenticated,

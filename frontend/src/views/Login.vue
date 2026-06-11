@@ -92,6 +92,7 @@ import { reactive, ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores'
 import { getSystemConfig, type SystemConfig } from '@/api'
+import { showToast } from '@/utils/toast'
 
 const router = useRouter()
 const authStore = useAuthStore()
@@ -112,8 +113,14 @@ const systemConfig = ref<SystemConfig>({
 async function handleLogin() {
   const success = await authStore.login(form)
   if (success) {
-    // 登录成功，跳转到首页
-    router.push('/')
+    if (authStore.mustChangePassword) {
+      // 默认管理员首登：引导至个人中心强制修改密码
+      showToast({ message: '请先修改默认密码', type: 'warning' })
+      router.push('/profile')
+    } else {
+      // 登录成功，跳转到首页
+      router.push('/')
+    }
   }
 }
 

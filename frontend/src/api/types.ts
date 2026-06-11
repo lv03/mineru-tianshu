@@ -32,6 +32,7 @@ export interface LoginResponse {
   access_token: string
   token_type: string
   expires_in: number
+  must_change_password?: boolean // 默认管理员首登须强制改密
 }
 
 // 注册请求
@@ -279,6 +280,7 @@ export interface Task {
     json_content?: any
     json_available?: boolean
     pdf_path?: string
+    pdf_url?: string // 带 HMAC 签名的 PDF 访问 URL（优先使用）
   } | null
 }
 

@@ -175,7 +175,10 @@ const layoutMode = ref<'split' | 'single'>('split')
 const activeBlockId = ref<string | number | null>(null)
 const pdfViewerRef = ref<InstanceType<typeof VirtualPdfViewer> | null>(null)
 
-const pdfUrl = computed(() => task.value?.data?.pdf_path ? `/api/v1/files/output/${task.value.data.pdf_path}` : null)
+// 优先使用后端返回的带签名 pdf_url；pdf_path 仅作旧数据兜底
+const pdfUrl = computed(() => task.value?.data?.pdf_url
+  ? task.value.data.pdf_url
+  : (task.value?.data?.pdf_path ? `/api/v1/files/output/${task.value.data.pdf_path}` : null))
 const showPdf = computed(() => layoutMode.value === 'split' || (layoutMode.value === 'single' && pdfUrl.value))
 const showMarkdown = computed(() => layoutMode.value === 'split' || layoutMode.value !== 'single')
 
