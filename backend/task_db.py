@@ -60,6 +60,9 @@ class TaskDB:
 
         # 确保 db_path 是绝对路径字符串
         self.db_path = str(Path(db_path).resolve())
+        # 无论路径来源如何，都确保父目录存在（显式传入路径时此前不会建目录，
+        # 一旦 data/db 被删/未创建，sqlite 会报 "unable to open database file"）
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def _get_conn(self):
@@ -74,6 +77,14 @@ class TaskDB:
         """
         conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30.0)
         conn.row_factory = sqlite3.Row
+        # WAL 模式：读写并发不互斥，显著缓解多 Worker 轮询 + API + 调度器并发下的
+        # "database is locked"。busy_timeout 在锁竞争时自动重试而非立即抛错。
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.Error as e:
+            logger.warning(f"⚠️ Failed to apply SQLite PRAGMA (WAL/busy_timeout): {e}")
         return conn
 
     @contextmanager
@@ -557,21 +568,74 @@ class TaskDB:
             return cursor.rowcount
 
     def reset_stale_tasks(self, timeout_minutes: int = 60):
-        """重置超时的 processing 任务为 pending"""
+        """
+        处理超时的 processing 任务：
+          - 普通任务：retry_count 未超上限 → 重置 pending(+1) 并重新入队；超上限 → 置 failed（杜绝无限重试）。
+          - 父任务：merge 已丢失，重新跑会重复拆分子任务，故直接置 failed（不回 pending）。
+        """
+        try:
+            from config import get_settings
+
+            max_retry = get_settings().max_retry
+        except Exception:
+            max_retry = int(os.getenv("MAX_RETRY", "3"))
         with self.get_cursor() as cursor:
             cursor.execute(
                 """
-                UPDATE tasks
-                SET status = 'pending',
-                    worker_id = NULL,
-                    retry_count = retry_count + 1
+                SELECT task_id, priority, retry_count, is_parent FROM tasks
                 WHERE status = 'processing'
                 AND started_at < datetime('now', '-' || ? || ' minutes')
-            """,
+                """,
                 (timeout_minutes,),
             )
-            reset_count = cursor.rowcount
-            return reset_count
+            stale = [dict(row) for row in cursor.fetchall()]
+
+            requeue_ids = []  # (task_id, priority)
+            reset_count = 0
+            for t in stale:
+                tid = t["task_id"]
+                if t.get("is_parent"):
+                    # 父任务超时：合并回调已丢失，标记失败，避免重置后被重新拆分产生重复子任务
+                    cursor.execute(
+                        "UPDATE tasks SET status='failed', error_message=?, completed_at=CURRENT_TIMESTAMP "
+                        "WHERE task_id=? AND status='processing'",
+                        ("父任务超时且合并回调丢失，已标记失败（请重新提交）", tid),
+                    )
+                    continue
+
+                if (t.get("retry_count") or 0) >= max_retry:
+                    cursor.execute(
+                        "UPDATE tasks SET status='failed', error_message=?, completed_at=CURRENT_TIMESTAMP "
+                        "WHERE task_id=? AND status='processing'",
+                        (f"超时重试已达上限({max_retry})，标记失败", tid),
+                    )
+                else:
+                    cursor.execute(
+                        "UPDATE tasks SET status='pending', worker_id=NULL, retry_count=retry_count+1 "
+                        "WHERE task_id=? AND status='processing'",
+                        (tid,),
+                    )
+                    if cursor.rowcount:
+                        reset_count += 1
+                        requeue_ids.append((tid, t.get("priority", 0) or 0))
+
+        # Redis 启用时，重置回 pending 的任务必须重新入队，否则对 dequeue 路径不可见
+        for tid, prio in requeue_ids:
+            self._enqueue_to_redis(tid, prio)
+        return reset_count
+
+    def heartbeat(self, task_id: str, worker_id: str) -> bool:
+        """续约任务心跳（仅 Redis 启用时有意义），防止长任务被 recover 误判超时重入队。"""
+        if not REDIS_QUEUE_AVAILABLE:
+            return False
+        redis_queue = get_redis_queue()
+        if not redis_queue:
+            return False
+        try:
+            return redis_queue.heartbeat(task_id, worker_id)
+        except Exception as e:
+            logger.debug(f"heartbeat failed for {task_id}: {e}")
+            return False
 
     # -------------------------------------------------------------------------
     # 新增功能：清理失败任务 (包含物理文件删除)
@@ -818,9 +882,20 @@ class TaskDB:
 
     def retry_task(self, task_id: str) -> bool:
         """
-        重试任务：将任务状态重置为 pending，清空错误和时间，重试次数 +1
+        重试任务：清理旧结果目录，将状态重置为 pending，清空错误和时间，重试次数 +1
         """
         with self.get_cursor() as cursor:
+            # 先清理旧的结果目录（按真实 result_path，而非臆测的 OUTPUT_DIR/task_id）
+            cursor.execute("SELECT result_path FROM tasks WHERE task_id = ?", (task_id,))
+            row = cursor.fetchone()
+            if row and row["result_path"] and row["result_path"] != "CLEARED":
+                try:
+                    p = Path(row["result_path"])
+                    if p.exists() and p.is_dir():
+                        shutil.rmtree(p)
+                except Exception as e:
+                    logger.warning(f"retry_task: failed to clean result dir for {task_id}: {e}")
+
             cursor.execute(
                 """
                 UPDATE tasks
@@ -828,12 +903,31 @@ class TaskDB:
                     error_message = NULL,
                     started_at = NULL,
                     completed_at = NULL,
+                    result_path = NULL,
                     worker_id = NULL,
                     retry_count = retry_count + 1
                 WHERE task_id = ?
                 """,
                 (task_id,),
             )
+            ok = cursor.rowcount > 0
+
+        # 重试也需重新入 Redis 队列（启用时）
+        if ok:
+            task = self.get_task(task_id)
+            if task:
+                self._enqueue_to_redis(task_id, task.get("priority", 0) or 0)
+        return ok
+
+    def delete_task_completely(self, task_id: str) -> bool:
+        """彻底删除任务：按真实 result_path 删除源文件与结果目录，再移除数据库记录。"""
+        with self.get_cursor() as cursor:
+            cursor.execute("SELECT task_id, file_path, result_path FROM tasks WHERE task_id = ?", (task_id,))
+            row = cursor.fetchone()
+            if not row:
+                return False
+            self._delete_task_files(row)
+            cursor.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
             return cursor.rowcount > 0
 
     def pause_task(self, task_id: str) -> bool:
@@ -866,6 +960,13 @@ class TaskDB:
             )
             return cursor.rowcount > 0
 
+    def is_cancelled(self, task_id: str) -> bool:
+        """查询任务是否已被取消（供 Worker 处理过程中轮询，实现真正的中断）。"""
+        with self.get_cursor() as cursor:
+            cursor.execute("SELECT status FROM tasks WHERE task_id = ?", (task_id,))
+            row = cursor.fetchone()
+            return bool(row) and row["status"] == "cancelled"
+
     def cancel_task(self, task_id: str) -> bool:
         """
         取消任务：将 pending/processing/paused 的任务置为 cancelled，保留数据库记录与文件。
@@ -885,9 +986,24 @@ class TaskDB:
 
     def clear_task_cache(self, task_id: str) -> bool:
         """
-        清理任务缓存：保留数据库历史记录，但将 result_path 标记为已清理
+        清理任务缓存：按真实 result_path 物理删除结果目录（保留源文件与数据库记录），
+        并将 result_path 标记为已清理。
         """
         with self.get_cursor() as cursor:
+            cursor.execute("SELECT result_path FROM tasks WHERE task_id = ?", (task_id,))
+            row = cursor.fetchone()
+            if not row:
+                return False
+
+            rp = row["result_path"]
+            if rp and rp != "CLEARED":
+                try:
+                    p = Path(rp)
+                    if p.exists() and p.is_dir():
+                        shutil.rmtree(p)
+                except Exception as e:
+                    logger.warning(f"clear_task_cache: failed to rmtree {rp}: {e}")
+
             cursor.execute(
                 """
                 UPDATE tasks

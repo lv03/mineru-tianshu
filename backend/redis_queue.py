@@ -27,6 +27,19 @@ except ImportError:
     logger.warning("⚠️  redis package not installed. Run: pip install redis")
 
 
+# 原子出队脚本：弹出最高优先级(最小 score)任务并同时写入 processing set，
+# 二者在 Redis 服务端单线程内原子执行，杜绝「已弹出但未记录」的丢任务窗口。
+_DEQUEUE_LUA = """
+local popped = redis.call('ZPOPMIN', KEYS[1], 1)
+if (not popped) or (#popped == 0) then
+    return nil
+end
+local task_id = popped[1]
+redis.call('HSET', KEYS[2], task_id, ARGV[1])
+return task_id
+"""
+
+
 @dataclass
 class RedisConfig:
     """Redis 配置"""
@@ -89,6 +102,7 @@ class RedisTaskQueue:
         self.config = config or RedisConfig.from_env()
         self._client: Optional[redis.Redis] = None
         self._connected = False
+        self._dequeue_script = None  # 延迟注册的原子出队 Lua 脚本
 
     @property
     def client(self) -> redis.Redis:
@@ -174,39 +188,36 @@ class RedisTaskQueue:
         timeout: float = 1.0,
     ) -> Optional[str]:
         """
-        从队列获取任务（阻塞式）
+        从队列获取任务
 
-        使用 BZPOPMIN 原子操作获取最高优先级任务
-        任务会移入 processing set，防止重复处理
+        使用 Lua 脚本把「弹出最高优先级任务」与「写入 processing set」合并为单条原子操作，
+        消除原先 BZPOPMIN + HSET 两步之间 Worker 崩溃导致任务丢失的窗口。
+        非阻塞实现：单次脚本调用；在 timeout 内以短轮询等待，避免忙等。
 
         Args:
             worker_id: Worker ID
-            timeout: 阻塞超时时间（秒）
+            timeout: 最长等待时间（秒）
 
         Returns:
             task_id: 任务ID，如果没有任务返回 None
         """
         try:
-            # 使用 BZPOPMIN 阻塞获取最小 score 的元素（最高优先级）
-            result = self.client.bzpopmin(self.config.queue_key, timeout=timeout)
+            if self._dequeue_script is None:
+                self._dequeue_script = self.client.register_script(_DEQUEUE_LUA)
 
-            if result is None:
-                return None
-
-            # result = (key, member, score)
-            _, task_id, _ = result
-
-            # 将任务添加到 processing set（带时间戳）
-            processing_data = json.dumps(
-                {
-                    "worker_id": worker_id,
-                    "claimed_at": time.time(),
-                }
-            )
-            self.client.hset(self.config.processing_key, task_id, processing_data)
-
-            logger.debug(f"📤 Task {task_id} claimed by worker {worker_id}")
-            return task_id
+            deadline = time.time() + max(0.0, timeout)
+            while True:
+                processing_data = json.dumps({"worker_id": worker_id, "claimed_at": time.time()})
+                task_id = self._dequeue_script(
+                    keys=[self.config.queue_key, self.config.processing_key],
+                    args=[processing_data],
+                )
+                if task_id:
+                    logger.debug(f"📤 Task {task_id} atomically claimed by worker {worker_id}")
+                    return task_id
+                if time.time() >= deadline:
+                    return None
+                time.sleep(0.05)
 
         except Exception as e:
             logger.error(f"❌ Failed to dequeue task: {e}")
@@ -418,7 +429,13 @@ def get_redis_queue() -> Optional[RedisTaskQueue]:
     """
     获取 Redis 队列实例（单例模式）
 
-    如果 Redis 不可用，返回 None（fallback 到 SQLite）
+    状态语义：
+        - None: 未初始化
+        - False: 配置上确认禁用（REDIS_QUEUE_ENABLED != true），永久缓存
+        - RedisTaskQueue: 已创建实例（即使当前 ping 不通也保留，允许后续自动重连）
+
+    与旧实现的区别：当 Redis「已启用但暂时连不上」时，不再把单例永久置 False，
+    而是保留实例并在每次调用时重新探测，使 Redis 晚于服务启动也能恢复使用。
 
     Returns:
         RedisTaskQueue 或 None
@@ -428,32 +445,40 @@ def get_redis_queue() -> Optional[RedisTaskQueue]:
     if not REDIS_AVAILABLE:
         return None
 
-    # 如果已经确认禁用（_queue_instance == False），直接返回 None
+    # 配置层面确认禁用：永久返回 None
     if _queue_instance is False:
         return None
 
+    # 首次：判断是否启用并尝试创建实例
     if _queue_instance is None:
-        # 检查是否启用 Redis 队列
-        if os.getenv("REDIS_QUEUE_ENABLED", "false").lower() != "true":
+        try:
+            from config import get_settings
+
+            enabled = get_settings().redis_queue_enabled
+        except Exception:
+            enabled = os.getenv("REDIS_QUEUE_ENABLED", "false").lower() == "true"
+
+        if not enabled:
             logger.info("ℹ️  Redis queue disabled (REDIS_QUEUE_ENABLED != true)")
-            # 设置为 False 表示已检查且确认禁用，下次调用直接返回
-            _queue_instance = False
+            _queue_instance = False  # 配置禁用，永久缓存
             return None
 
         try:
             _queue_instance = RedisTaskQueue()
+            # 创建时探测一次仅用于日志；无论通断都保留实例，
+            # 后续由 redis-py 的按命令自动重连处理瞬时断连。
             if _queue_instance.is_available():
-                logger.info(
-                    f"✅ Redis queue connected: " f"{_queue_instance.config.host}:{_queue_instance.config.port}"
-                )
+                logger.info(f"✅ Redis queue connected: {_queue_instance.config.host}:{_queue_instance.config.port}")
             else:
-                logger.warning("⚠️  Redis queue not available, falling back to SQLite")
-                _queue_instance = False  # 标记为已检查且不可用
+                logger.warning("⚠️  Redis enabled but not reachable yet; will retry on demand (SQLite fallback)")
         except Exception as e:
             logger.error(f"❌ Failed to initialize Redis queue: {e}")
-            _queue_instance = False  # 标记为已检查且初始化失败
+            # 创建失败可能是瞬时问题，不永久禁用；下次调用再试
+            _queue_instance = None
+            return None
 
-    # 返回实例（可能是 RedisTaskQueue 或 None）
+    # 已有实例：直接返回。单条命令失败由各方法 try/except 兜底并回退 SQLite，
+    # redis-py 会在下一条命令自动重连，无需每次 ping（避免给轮询增加开销）。
     return _queue_instance if isinstance(_queue_instance, RedisTaskQueue) else None
 
 

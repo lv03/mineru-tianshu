@@ -171,6 +171,20 @@ class TaskScheduler:
                         except Exception as e:
                             logger.error(f"Failed to reset stale tasks: {e}")
 
+                    # 3.5 Redis 队列超时恢复（每个监控周期都执行，开销很小）
+                    #     处理「Worker 崩溃后遗留在 processing set」的任务：超时未心跳则重新入队。
+                    #     此前 recover_stale_tasks/heartbeat 是死代码，从未被调用。
+                    try:
+                        from redis_queue import get_redis_queue
+
+                        rq = get_redis_queue()
+                        if rq:
+                            recovered = rq.recover_stale_tasks()
+                            if recovered:
+                                logger.warning(f"🔄 [Redis] Recovered {recovered} stale tasks back to queue")
+                    except Exception as e:
+                        logger.debug(f"Redis stale recovery skipped: {e}")
+
                     # 4. 定期清理旧任务文件
                     cleanup_counter += 1
                     # 每24小时清理一次
