@@ -10,10 +10,19 @@ import string
 import time
 from pathlib import Path
 from typing import Dict, Optional, List
+from urllib.parse import urlparse
+from datetime import timedelta
 from loguru import logger
 from minio import Minio
 from minio.error import S3Error
 from datetime import datetime
+
+# 公开可读对象前缀（如系统 Logo），登录页未鉴权即需加载；其余对象一律私有 + presigned 访问
+PUBLIC_PREFIX = "logos/"
+# 对象引用 scheme：存储层只写入此引用，API 读时再生成 presigned URL，避免把过期 URL 戳进文件
+REFERENCE_SCHEME = "minio://"
+# presigned URL 默认有效期
+PRESIGN_TTL = timedelta(seconds=int(os.getenv("MINIO_PRESIGN_TTL", "3600")))
 
 
 class MinIOClient:
@@ -116,18 +125,62 @@ class MinIOClient:
             secure: 是否使用 HTTPS
             public_url: 公开访问 URL (必须设置，例如: http://192.168.1.100:9000)
         """
-        # 从环境变量读取配置
-        self.endpoint = endpoint or os.getenv("MINIO_ENDPOINT") or os.getenv("RUSTFS_ENDPOINT", "minio:9000")
-        self.access_key = access_key or os.getenv("MINIO_ACCESS_KEY") or os.getenv("RUSTFS_ACCESS_KEY", "minioadmin")
-        self.secret_key = secret_key or os.getenv("MINIO_SECRET_KEY") or os.getenv("RUSTFS_SECRET_KEY", "minioadmin")
-        self.bucket_name = bucket_name or os.getenv("MINIO_BUCKET") or os.getenv("RUSTFS_BUCKET", "ts-img")
-        self.secure = secure or (
-            os.getenv("MINIO_SECURE", os.getenv("RUSTFS_SECURE", "false")).lower() == "true"
-        )
+        # 从配置层读取（集中声明，兼容旧 RUSTFS_*）；config 不可用时回退直接读 env
+        try:
+            from config import get_settings
+
+            _s = get_settings()
+            _endpoint, _ak, _sk, _bucket, _public = (
+                _s.minio_endpoint,
+                _s.minio_access_key,
+                _s.minio_secret_key,
+                _s.minio_bucket,
+                _s.minio_public_url,
+            )
+        except Exception:
+            _endpoint = os.getenv("MINIO_ENDPOINT") or os.getenv("RUSTFS_ENDPOINT", "minio:9000")
+            _ak = os.getenv("MINIO_ACCESS_KEY") or os.getenv("RUSTFS_ACCESS_KEY")
+            _sk = os.getenv("MINIO_SECRET_KEY") or os.getenv("RUSTFS_SECRET_KEY")
+            _bucket = os.getenv("MINIO_BUCKET") or os.getenv("RUSTFS_BUCKET", "ts-img")
+            _public = os.getenv("MINIO_PUBLIC_URL") or os.getenv("RUSTFS_PUBLIC_URL", "")
+
+        self.endpoint = endpoint or _endpoint
+        # 凭据必须显式配置，不再回落到公开已知的 minioadmin/minioadmin
+        self.access_key = access_key or _ak
+        self.secret_key = secret_key or _sk
+        self.bucket_name = bucket_name or _bucket
+        self.secure = secure or (os.getenv("MINIO_SECURE", os.getenv("RUSTFS_SECURE", "false")).lower() == "true")
+
+        if not self.access_key or not self.secret_key:
+            raise ValueError(
+                "MinIO 凭据未配置。请在 .env 中设置 MINIO_ACCESS_KEY 与 MINIO_SECRET_KEY，"
+                "不要使用默认的 minioadmin/minioadmin。"
+            )
+
+        # 弱凭据检测：生产模式禁用众所周知的 minioadmin（持有=对象存储管理员），开发模式仅告警
+        weak_creds = {"minioadmin", "admin", "password", "root"}
+        if self.access_key.lower() in weak_creds or self.secret_key.lower() in weak_creds:
+            try:
+                from config import get_settings
+
+                is_production = get_settings().is_production
+            except Exception:
+                is_production = (
+                    os.getenv("ENV", "").lower() == "production"
+                    or os.getenv("REQUIRE_SECRETS", "").lower() == "true"
+                )
+            if is_production:
+                raise ValueError(
+                    "MinIO 凭据为弱口令（如 minioadmin）。生产环境必须改为强随机凭据 "
+                    "(例如: openssl rand -hex 16)，否则任何人拿到密钥即获得对象存储完整读写权限。"
+                )
+            logger.warning(
+                "⚠️  MinIO 凭据为弱口令（如 minioadmin）——仅限本地开发！"
+                "上线前务必在 .env 改为强随机的 MINIO_ACCESS_KEY / MINIO_SECRET_KEY。"
+            )
 
         # 公开 URL 配置：必须通过 MINIO_PUBLIC_URL 环境变量设置
-        self.public_url = public_url or os.getenv("MINIO_PUBLIC_URL") or os.getenv("RUSTFS_PUBLIC_URL", "")
-        self.public_url = self.public_url.strip()
+        self.public_url = (public_url or _public or "").strip()
 
         if not self.public_url:
             logger.error("❌ MINIO_PUBLIC_URL not configured!")
@@ -164,6 +217,17 @@ class MinIOClient:
             logger.info(f"   Bucket: {self.bucket_name}")
             logger.info(f"   Public URL: {self.public_url}")
 
+            # 用于生成 presigned URL 的客户端：必须以「浏览器可达的公开 endpoint」签名，
+            # 否则签名里的 host 是内网地址（如 minio:9000），浏览器无法访问。
+            parsed = urlparse(self.public_url)
+            public_host = parsed.netloc or parsed.path  # 容错：public_url 可能不带 scheme
+            self._presign_client = Minio(
+                public_host,
+                access_key=self.access_key,
+                secret_key=self.secret_key,
+                secure=(parsed.scheme == "https"),
+            )
+
             # 确保 Bucket 存在
             self._ensure_bucket()
 
@@ -172,33 +236,34 @@ class MinIOClient:
             raise
 
     def _ensure_bucket(self):
-        """确保 Bucket 存在，不存在则创建"""
+        """确保 Bucket 存在，并将访问策略收敛为「仅 logos/ 前缀公开读，其余私有」。"""
         try:
             if not self.client.bucket_exists(self.bucket_name):
                 self.client.make_bucket(self.bucket_name)
                 logger.info(f"✅ Created bucket: {self.bucket_name}")
-
-                # 设置为公开读取（可选，根据需求调整）
-                try:
-                    policy = {
-                        "Version": "2012-10-17",
-                        "Statement": [
-                            {
-                                "Effect": "Allow",
-                                "Principal": {"AWS": ["*"]},
-                                "Action": ["s3:GetObject"],
-                                "Resource": [f"arn:aws:s3:::{self.bucket_name}/*"],
-                            }
-                        ],
-                    }
-                    import json
-
-                    self.client.set_bucket_policy(self.bucket_name, json.dumps(policy))
-                    logger.info("✅ Set bucket policy: public read")
-                except Exception as e:
-                    logger.warning(f"⚠️  Failed to set bucket policy (may need manual configuration): {e}")
             else:
                 logger.debug(f"✅ Bucket exists: {self.bucket_name}")
+
+            # 每次初始化都重设策略（幂等），使存量桶也从「整桶公开」收敛到「仅 logos/ 公开」，
+            # 任务图片不再世界可读，改由 API 读时签发 presigned URL 访问。
+            try:
+                policy = {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {"AWS": ["*"]},
+                            "Action": ["s3:GetObject"],
+                            "Resource": [f"arn:aws:s3:::{self.bucket_name}/{PUBLIC_PREFIX}*"],
+                        }
+                    ],
+                }
+                import json
+
+                self.client.set_bucket_policy(self.bucket_name, json.dumps(policy))
+                logger.info(f"✅ Set bucket policy: public read only for '{PUBLIC_PREFIX}*', rest private")
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to set bucket policy (may need manual configuration): {e}")
         except S3Error as e:
             logger.error(f"❌ Failed to ensure bucket: {e}")
             raise
@@ -208,6 +273,7 @@ class MinIOClient:
         file_path: str,
         object_name: Optional[str] = None,
         content_type: Optional[str] = None,
+        public: bool = False,
     ) -> str:
         """
         上传单个文件到 MinIO
@@ -216,15 +282,11 @@ class MinIOClient:
             file_path: 本地文件路径
             object_name: 对象名称 (不指定则自动生成: YYYYMMDD/msec_nano.ext)
             content_type: MIME 类型 (不指定则自动检测)
+            public: 是否为公开资产（如 Logo）。公开资产返回直链 URL（需位于 PUBLIC_PREFIX 下），
+                    其余返回稳定对象引用 minio://bucket/object，由 API 读时换成 presigned URL。
 
         Returns:
-            可访问的公开 URL
-
-        Example:
-            生成的路径: 20241205/a3f2K_V1St.jpg (约24字符)
-
-        Note:
-            使用毫秒时间戳+NanoID，多Worker并发安全
+            public=True 时返回公开直链；否则返回 minio://bucket/object 引用
         """
         file_path = Path(file_path)
 
@@ -251,11 +313,15 @@ class MinIOClient:
                 content_type=content_type,
             )
 
-            # 生成公开 URL
-            url = f"{self.public_url}/{self.bucket_name}/{object_name}"
+            if public:
+                # 公开资产：返回直链（依赖 PUBLIC_PREFIX 的公开读策略）
+                result = f"{self.public_url}/{self.bucket_name}/{object_name}"
+            else:
+                # 私有资产：返回稳定引用，读时再签发 presigned URL
+                result = f"{REFERENCE_SCHEME}{self.bucket_name}/{object_name}"
 
             logger.debug(f"✅ Uploaded: {file_path.name} -> {object_name}")
-            return url
+            return result
 
         except S3Error as e:
             logger.error(f"❌ Failed to upload {file_path.name}: {e}")
@@ -344,6 +410,29 @@ class MinIOClient:
         }
 
         return content_types.get(extension, "application/octet-stream")
+
+    @staticmethod
+    def is_reference(value: str) -> bool:
+        """判断字符串是否为对象引用 minio://bucket/object"""
+        return isinstance(value, str) and value.startswith(REFERENCE_SCHEME)
+
+    def presign_reference(self, reference: str, expires: timedelta = PRESIGN_TTL) -> str:
+        """
+        将对象引用 minio://bucket/object 换成浏览器可达的 presigned GET URL。
+
+        若 reference 不是合法引用则原样返回（兼容历史直链 URL）。
+        """
+        if not self.is_reference(reference):
+            return reference
+        rest = reference[len(REFERENCE_SCHEME) :]
+        bucket, _, object_name = rest.partition("/")
+        if not object_name:
+            return reference
+        try:
+            return self._presign_client.presigned_get_object(bucket, object_name, expires=expires)
+        except Exception as e:
+            logger.error(f"❌ Failed to presign {reference}: {e}")
+            return reference
 
     def delete_file(self, object_name: str) -> bool:
         """

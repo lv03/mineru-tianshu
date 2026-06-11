@@ -91,12 +91,18 @@ class BaseOutputNormalizer:
     def _process_minio_upload(self, result: Dict[str, Any]):
         """处理 MinIO 上传和 URL 替换"""
 
-        # 检查是否启用 MinIO，兼容旧 RUSTFS_ENABLED 配置
-        minio_enabled = os.getenv("MINIO_ENABLED", os.getenv("RUSTFS_ENABLED", "true")).lower() in (
-            "true",
-            "1",
-            "yes",
-        )
+        # 检查是否启用 MinIO（集中到 config.Settings，默认关闭；兼容旧 RUSTFS_ENABLED）
+        # 默认关闭：与 CLAUDE.md 文档一致，避免 native/CPU 部署（无 MinIO）每个含图任务都尝试上传并报错
+        try:
+            from config import get_settings
+
+            minio_enabled = get_settings().minio_enabled
+        except Exception:
+            minio_enabled = os.getenv("MINIO_ENABLED", os.getenv("RUSTFS_ENABLED", "false")).lower() in (
+                "true",
+                "1",
+                "yes",
+            )
 
         if not minio_enabled:
             logger.info("ℹ️  MinIO is disabled (MINIO_ENABLED=false), using local file service")
