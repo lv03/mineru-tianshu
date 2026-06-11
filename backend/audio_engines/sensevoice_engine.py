@@ -57,6 +57,38 @@ class SenseVoiceEngine:
         p = self._model_root() / dirname
         return str(p) if p.exists() else fallback_id
 
+    @staticmethod
+    def _clean_sensevoice_text(text: str) -> str:
+        """
+        清洗 SenseVoice 原始文本中的富文本标签。
+
+        SenseVoice 输出形如 ``<|zh|><|ANGRY|><|Speech|><|withitn|>正文`` 的标记，
+        必须经 funasr 的 rich_transcription_postprocess 处理（语言/ITN/事件标签剥离、
+        情感转 emoji）后才适合给人或 LLM 消费。funasr 不可用时正则兜底剥离所有 <|...|> 标签。
+        """
+        if not text:
+            return text
+        try:
+            from funasr.utils.postprocess_utils import rich_transcription_postprocess
+
+            return rich_transcription_postprocess(text)
+        except Exception:
+            import re
+
+            return re.sub(r"<\|[^|]*\|>", "", text).strip()
+
+    @staticmethod
+    def _get_audio_duration(audio_path: Path) -> float:
+        """读取音频真实时长（秒）。优先用 soundfile（仅读文件头，不解码），失败返回 0。"""
+        try:
+            import soundfile as sf
+
+            info = sf.info(str(audio_path))
+            return float(info.frames) / float(info.samplerate) if info.samplerate else 0.0
+        except Exception as e:
+            logger.debug(f"⚠️  读取音频时长失败 ({audio_path.name}): {e}")
+            return 0.0
+
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
             with cls._lock:
@@ -487,8 +519,8 @@ class SenseVoiceEngine:
                 }
             )
 
-        # 计算总时长
-        duration = segments[-1]["end"] if segments else 0
+        # 计算总时长：优先用音频真实总长（含片尾静音），读不到再回退到末段结束时间
+        duration = self._get_audio_duration(audio_path) or (segments[-1]["end"] if segments else 0)
 
         # 统计说话人数量
         speakers = set(seg.get("speaker", "SPEAKER_00") for seg in segments)
@@ -659,8 +691,8 @@ class SenseVoiceEngine:
         # 获取第一个结果（通常只有一个）
         first_result = result[0]
 
-        # 提取文本
-        transcript = first_result.get("text", "")
+        # 提取文本（SenseVoice 原始文本含 <|zh|><|EMO|> 等富文本标签，需清洗）
+        transcript = self._clean_sensevoice_text(first_result.get("text", ""))
 
         # 提取时间戳（如果有）
         timestamp = first_result.get("timestamp", [])
@@ -717,8 +749,10 @@ class SenseVoiceEngine:
                 }
             )
 
-        # 计算总时长
-        duration = segments[-1]["end"] if segments else 0
+        # 计算总时长：基础模式通常无有效时间戳，回退到读取音频真实时长
+        duration = segments[-1]["end"] if segments and segments[-1].get("end") else 0
+        if not duration:
+            duration = self._get_audio_duration(audio_path)
 
         # 检测语言
         detected_language = language_tags[0] if language_tags else "auto"
@@ -731,7 +765,9 @@ class SenseVoiceEngine:
             "metadata": {
                 "duration": duration,
                 "language": detected_language,
-                "speaker_count": 1,  # 基础模式默认为1个说话人
+                # 基础模式不做说话人分离，置 None 表示"未分离"，由 markdown 区分显示（不再写死为 1）
+                "speaker_count": None,
+                "speaker_diarization_enabled": False,
                 "emotion_enabled": bool(emotion_tags),
             },
         }
@@ -757,7 +793,11 @@ class SenseVoiceEngine:
         lines.append("## 元数据\n")
         lines.append(f"- **时长**: {metadata.get('duration', 0):.2f} 秒")
         lines.append(f"- **语言**: {metadata.get('language', 'unknown')}")
-        lines.append(f"- **说话人数量**: {metadata.get('speaker_count', 1)}")
+        speaker_count = metadata.get("speaker_count")
+        if speaker_count:
+            lines.append(f"- **说话人数量**: {speaker_count}")
+        else:
+            lines.append("- **说话人数量**: 未分离（基础模式）")
 
         if metadata.get("speaker_diarization_enabled"):
             lines.append(f"- **说话人分离**: ✅ 已启用 ({metadata.get('speaker_diarization_method', 'FunASR')})")

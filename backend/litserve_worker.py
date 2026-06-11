@@ -725,7 +725,7 @@ class MinerUWorkerAPI(ls.LitAPI):
         if self.sensevoice_engine is None:
             from audio_engines import SenseVoiceEngine
 
-            self.sensevoice_engine = SenseVoiceEngine(device=self.engine_device)
+            self.sensevoice_engine = SenseVoiceEngine(device=self.engine_device, enable_speaker_diarization=True)
 
         output_dir = Path(self.output_dir) / Path(file_path).stem
         output_dir.mkdir(parents=True, exist_ok=True)
