@@ -95,6 +95,7 @@ class TianshuLauncher:
         mcp_port=8002,
         paddleocr_vl_vllm_engine_enabled=False,  # 新增paddle ocr vllm engine 配置
         paddleocr_vl_vllm_api_list=[],  # 新增paddle ocr vllm engine 配置
+        mineru_vllm_api_list=None,  # MinerU VLM 远端 API 列表
     ):
         self.output_dir = output_dir
         self.api_port = api_port
@@ -104,9 +105,25 @@ class TianshuLauncher:
         self.accelerator = accelerator
         self.enable_mcp = enable_mcp
         self.mcp_port = mcp_port
-        self.processes = []
+        self.processes = []  # list of dicts: {name, proc, cmd, env, restarts, restartable}
+        self.max_restarts = int(os.getenv("SERVICE_MAX_RESTARTS", "5"))
+        self._shutting_down = False
         self.paddleocr_vl_vllm_engine_enabled = paddleocr_vl_vllm_engine_enabled
         self.paddleocr_vl_vllm_api_list = paddleocr_vl_vllm_api_list
+        self.mineru_vllm_api_list = mineru_vllm_api_list or []
+
+    def _register(self, name, proc, cmd, env, restartable=True):
+        """登记子进程及其重启所需的启动规格。"""
+        self.processes.append(
+            {
+                "name": name,
+                "proc": proc,
+                "cmd": cmd,
+                "env": env,
+                "restarts": 0,
+                "restartable": restartable,
+            }
+        )
 
     def check_ocr_models(self):
         """检查并下载所有 OCR 模型（异步，不阻塞启动）"""
@@ -163,8 +180,9 @@ class TianshuLauncher:
             env = os.environ.copy()
             env["API_PORT"] = str(self.api_port)
             env["OUTPUT_PATH"] = self.output_dir  # 设置输出目录（与 Worker 保持一致）
-            api_proc = subprocess.Popen([sys.executable, "api_server.py"], cwd=Path(__file__).parent, env=env)
-            self.processes.append(("API Server", api_proc))
+            api_cmd = [sys.executable, "api_server.py"]
+            api_proc = subprocess.Popen(api_cmd, cwd=Path(__file__).parent, env=env)
+            self._register("API Server", api_proc, api_cmd, env)
             time.sleep(3)
 
             if api_proc.poll() is not None:
@@ -201,9 +219,12 @@ class TianshuLauncher:
                 worker_cmd.extend(["--paddleocr-vl-vllm-engine-enabled"])
             # 添加 paddleocr-vl-vllm-api-list 参数
             worker_cmd.extend(["--paddleocr-vl-vllm-api-list", str(self.paddleocr_vl_vllm_api_list)])
+            # 透传 MinerU VLM API 列表（此前从未传递，导致 native 模式 vlm-*/hybrid-* 拿不到远端端点）
+            if self.mineru_vllm_api_list:
+                worker_cmd.extend(["--mineru-vllm-api-list", str(self.mineru_vllm_api_list)])
 
             worker_proc = subprocess.Popen(worker_cmd, cwd=Path(__file__).parent, env=worker_env)
-            self.processes.append(("LitServe Workers", worker_proc))
+            self._register("LitServe Workers", worker_proc, worker_cmd, worker_env)
             time.sleep(5)
 
             if worker_proc.poll() is not None:
@@ -226,7 +247,7 @@ class TianshuLauncher:
             ]
 
             scheduler_proc = subprocess.Popen(scheduler_cmd, cwd=Path(__file__).parent)
-            self.processes.append(("Task Scheduler", scheduler_proc))
+            self._register("Task Scheduler", scheduler_proc, scheduler_cmd, None)
             time.sleep(3)
 
             if scheduler_proc.poll() is not None:
@@ -245,7 +266,7 @@ class TianshuLauncher:
                 mcp_env["MCP_HOST"] = "0.0.0.0"
 
                 mcp_proc = subprocess.Popen([sys.executable, "mcp_server.py"], cwd=Path(__file__).parent, env=mcp_env)
-                self.processes.append(("MCP Server", mcp_proc))
+                self._register("MCP Server", mcp_proc, [sys.executable, "mcp_server.py"], mcp_env)
                 time.sleep(3)
 
                 if mcp_proc.poll() is not None:
@@ -270,8 +291,8 @@ class TianshuLauncher:
                 logger.info(f"   • MCP Endpoint:      http://localhost:{self.mcp_port}/mcp/sse")
             logger.info("")
             logger.info("🔧 Service Details:")
-            for name, proc in self.processes:
-                logger.info(f"   • {name:20s} PID: {proc.pid}")
+            for entry in self.processes:
+                logger.info(f"   • {entry['name']:20s} PID: {entry['proc'].pid}")
             logger.info("")
             logger.info("⚠️  Press Ctrl+C to stop all services")
             logger.info("=" * 70)
@@ -295,18 +316,21 @@ class TianshuLauncher:
 
     def stop_services(self, signum=None, frame=None):
         """停止所有服务"""
+        self._shutting_down = True
         logger.info("")
         logger.info("=" * 70)
         logger.info("⏹️  Stopping All Services...")
         logger.info("=" * 70)
 
-        for name, proc in self.processes:
+        for entry in self.processes:
+            name, proc = entry["name"], entry["proc"]
             if proc.poll() is None:  # 进程仍在运行
                 logger.info(f"   Stopping {name} (PID: {proc.pid})...")
                 proc.terminate()
 
         # 等待所有进程结束
-        for name, proc in self.processes:
+        for entry in self.processes:
+            name, proc = entry["name"], entry["proc"]
             try:
                 proc.wait(timeout=10)
                 logger.info(f"   ✅ {name} stopped")
@@ -320,18 +344,45 @@ class TianshuLauncher:
         logger.info("=" * 70)
         sys.exit(0)
 
+    def _restart_entry(self, entry) -> bool:
+        """按指数退避重启单个崩溃的子进程；超过上限返回 False。"""
+        if not entry.get("restartable", True):
+            return False
+        if entry["restarts"] >= self.max_restarts:
+            logger.error(f"❌ {entry['name']} 已达最大重启次数 ({self.max_restarts})，放弃重启")
+            return False
+
+        entry["restarts"] += 1
+        backoff = min(60, 2 ** entry["restarts"])  # 2,4,8,... 上限 60s
+        logger.warning(
+            f"♻️  Restarting {entry['name']} "
+            f"(attempt {entry['restarts']}/{self.max_restarts}, backoff {backoff}s)..."
+        )
+        time.sleep(backoff)
+        try:
+            entry["proc"] = subprocess.Popen(entry["cmd"], cwd=Path(__file__).parent, env=entry["env"])
+            logger.info(f"   ✅ {entry['name']} restarted (PID: {entry['proc'].pid})")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to restart {entry['name']}: {e}")
+            return False
+
     def wait(self):
-        """等待所有服务"""
+        """监控所有子进程；单个崩溃时尝试重启，仅在不可恢复时才整体退出。"""
         try:
             while True:
                 time.sleep(1)
+                if self._shutting_down:
+                    return
 
-                # 检查进程状态
-                for name, proc in self.processes:
-                    if proc.poll() is not None:
-                        logger.error(f"❌ {name} unexpectedly stopped!")
-                        self.stop_services()
-                        return
+                for entry in self.processes:
+                    if entry["proc"].poll() is not None:
+                        logger.error(f"❌ {entry['name']} unexpectedly stopped (exit={entry['proc'].returncode})!")
+                        # 尝试重启该进程；重启失败（达上限/不可重启）才整体停服
+                        if not self._restart_entry(entry):
+                            logger.error(f"❌ {entry['name']} 无法恢复，停止全部服务")
+                            self.stop_services()
+                            return
 
         except KeyboardInterrupt:
             self.stop_services()
@@ -352,6 +403,16 @@ def main():
 
     # 注入本地模型路径（原生开发：使用 backend/model 下的模型，须在 .env 之后、子进程之前执行）
     configure_local_models()
+
+    # 安全校验：生产模式下若 JWT 密钥缺省/占位符，fail-fast，避免子进程起来后才暴露问题
+    try:
+        from auth.jwt_handler import validate_secret
+
+        validate_secret()
+    except RuntimeError as e:
+        logger.error(f"❌ 安全配置校验失败: {e}")
+        sys.exit(1)
+
     parser = argparse.ArgumentParser(
         description="MinerU Tianshu - 统一启动脚本",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -411,6 +472,12 @@ def main():
         default=[],
         help='PaddleOCR VL VLLM API 列表（Python list 字面量格式，如: \'["http://0.0.0.0:17300/v1", "http://0.0.0.0:17301/v1"]\'）',
     )
+    parser.add_argument(
+        "--mineru-vllm-api-list",
+        type=parse_list_arg,
+        default=[],
+        help='MinerU VLM (vlm-*/hybrid-*) 远端 API 列表（Python list 字面量格式）',
+    )
 
     args = parser.parse_args()
 
@@ -438,18 +505,24 @@ def main():
             logger.success(f"PaddleOCR VL VLLM 引擎，API 列表为: {args.paddleocr_vl_vllm_api_list}")
     else:
         logger.info("start_all 脚本中PaddleOCR VL VLLM 引擎已设置不启用")
+    # 并发数解析：MAX_CONCURRENT_TASKS 环境变量（文档化的旧知）优先，未设置时用 CLI --workers-per-device。
+    # 解析出单一有效值后透传给 worker，消除「CLI flag 被 worker 端 env 静默覆盖」的旧契约冲突。
+    env_concurrency = os.getenv("MAX_CONCURRENT_TASKS")
+    effective_workers = int(env_concurrency) if env_concurrency else args.workers_per_device
+
     # 创建启动器
     launcher = TianshuLauncher(
         output_dir=args.output_dir,
         api_port=args.api_port,
         worker_port=args.worker_port,
-        workers_per_device=args.workers_per_device,
+        workers_per_device=effective_workers,
         devices=devices,
         accelerator=args.accelerator,
         enable_mcp=args.enable_mcp,
         mcp_port=args.mcp_port,
         paddleocr_vl_vllm_engine_enabled=args.paddleocr_vl_vllm_engine_enabled,
         paddleocr_vl_vllm_api_list=args.paddleocr_vl_vllm_api_list,
+        mineru_vllm_api_list=args.mineru_vllm_api_list,
     )
 
     # 设置信号处理
