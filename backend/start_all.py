@@ -17,6 +17,10 @@ import sys
 import time
 import os
 import json
+import socket
+import urllib.error
+import urllib.parse
+import urllib.request
 from loguru import logger
 from pathlib import Path
 import argparse
@@ -95,6 +99,10 @@ class TianshuLauncher:
         mcp_port=8002,
         paddleocr_vl_vllm_engine_enabled=False,  # 新增paddle ocr vllm engine 配置
         paddleocr_vl_vllm_api_list=[],  # 新增paddle ocr vllm engine 配置
+        paddleocr_vl_mlx_server_url="http://127.0.0.1:8111/v1",
+        paddleocr_vl_mlx_model_path=None,
+        auto_start_mlx_server=False,
+        mlx_venv_path=None,
         mineru_vllm_api_list=None,  # MinerU VLM 远端 API 列表
     ):
         self.output_dir = output_dir
@@ -110,6 +118,12 @@ class TianshuLauncher:
         self._shutting_down = False
         self.paddleocr_vl_vllm_engine_enabled = paddleocr_vl_vllm_engine_enabled
         self.paddleocr_vl_vllm_api_list = paddleocr_vl_vllm_api_list
+        self.paddleocr_vl_mlx_server_url = paddleocr_vl_mlx_server_url
+        self.paddleocr_vl_mlx_model_path = paddleocr_vl_mlx_model_path or str(
+            (Path(__file__).parent / "model" / "paddlex_cache" / "official_models" / "PaddleOCR-VL-1.6-0.9B").resolve()
+        )
+        self.auto_start_mlx_server = auto_start_mlx_server
+        self.mlx_venv_path = mlx_venv_path or str((Path(__file__).parent / ".venv-mlx").resolve())
         self.mineru_vllm_api_list = mineru_vllm_api_list or []
 
     def _register(self, name, proc, cmd, env, restartable=True):
@@ -146,6 +160,11 @@ class TianshuLauncher:
                 else:
                     logger.warning(f"⚠️  PaddleOCR model cache not found at: {model_cache_dir}")
 
+                if self.accelerator == "cpu":
+                    logger.info("   CPU/Apple Silicon mode detected; PaddleOCR-VL tasks will use MLX server backend")
+                    logger.info(f"   MLX server URL: {self.paddleocr_vl_mlx_server_url}")
+                    return
+
                 # 简单初始化引擎（不触发下载）
                 try:
                     PaddleOCRVLEngine()
@@ -163,6 +182,103 @@ class TianshuLauncher:
         thread_paddleocr = threading.Thread(target=check_paddleocr_vl, daemon=True)
         thread_paddleocr.start()
 
+    def _mlx_server_host_port(self):
+        parsed = urllib.parse.urlparse(self.paddleocr_vl_mlx_server_url)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or 8111
+        return host, port
+
+    def _mlx_http_ok(self, url):
+        try:
+            with urllib.request.urlopen(url, timeout=2) as resp:
+                return 200 <= resp.status < 400
+        except urllib.error.HTTPError as e:
+            return 200 <= e.code < 400
+        except Exception:
+            return False
+
+    def _mlx_server_ready(self):
+        base_url = self.paddleocr_vl_mlx_server_url.rstrip("/")
+        root_url = base_url[:-3] if base_url.endswith("/v1") else base_url
+        return self._mlx_http_ok(f"{root_url}/health") or self._mlx_http_ok(f"{base_url}/models")
+
+    def _mlx_port_in_use(self):
+        host, port = self._mlx_server_host_port()
+        try:
+            with socket.create_connection((host, port), timeout=1):
+                return True
+        except OSError:
+            return False
+
+    def _wait_for_mlx_vlm_server(self, proc, timeout=180):
+        deadline = time.time() + timeout
+
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                logger.error(f"❌ MLX VLM Server exited early (exit={proc.returncode})")
+                return False
+
+            if self._mlx_server_ready():
+                logger.info("   ✅ MLX VLM Server is ready")
+                return True
+
+            time.sleep(2)
+
+        logger.error(f"❌ MLX VLM Server not ready after {timeout}s: {self.paddleocr_vl_mlx_server_url}")
+        return False
+
+    def _start_mlx_vlm_server(self):
+        model_path = Path(self.paddleocr_vl_mlx_model_path).expanduser().resolve()
+        venv_path = Path(self.mlx_venv_path).expanduser().resolve()
+        python_bin = venv_path / "bin" / "python"
+
+        if self._mlx_server_ready():
+            logger.info(f"   ✅ Reusing existing MLX VLM Server at {self.paddleocr_vl_mlx_server_url}")
+            return None
+
+        if self._mlx_port_in_use():
+            raise RuntimeError(
+                f"Port for MLX VLM Server is already in use but {self.paddleocr_vl_mlx_server_url} is not healthy. "
+                "Stop the existing process or choose another --paddleocr-vl-mlx-server-url."
+            )
+
+        if not python_bin.exists():
+            raise FileNotFoundError(
+                f"MLX venv Python not found: {python_bin}. Create it with backend/.venv-mlx and install mlx-vlm."
+            )
+        if not model_path.exists():
+            raise FileNotFoundError(f"PaddleOCR-VL MLX model path not found: {model_path}")
+
+        host, port = self._mlx_server_host_port()
+        mlx_env = os.environ.copy()
+        mlx_env["MLX_VLM_SERVER_URL"] = self.paddleocr_vl_mlx_server_url
+        mlx_env["MLX_VLM_API_MODEL_NAME"] = str(model_path)
+        mlx_env.pop("PYTHONPATH", None)
+
+        cmd = [
+            str(python_bin),
+            "-m",
+            "mlx_vlm.server",
+            "--host",
+            host,
+            "--port",
+            str(port),
+            "--model",
+            str(model_path),
+            "--trust-remote-code",
+        ]
+
+        logger.info(f"🧠 Starting MLX VLM Server on {self.paddleocr_vl_mlx_server_url}")
+        logger.info(f"   Python: {python_bin}")
+        logger.info(f"   Model:  {model_path}")
+        proc = subprocess.Popen(cmd, cwd=Path(__file__).parent, env=mlx_env)
+        self._register("MLX VLM Server", proc, cmd, mlx_env)
+
+        if not self._wait_for_mlx_vlm_server(proc):
+            raise RuntimeError("MLX VLM Server failed to become ready")
+
+        return proc
+
     def start_services(self):
         """启动所有服务"""
         logger.info("=" * 70)
@@ -173,10 +289,11 @@ class TianshuLauncher:
         logger.info("")
 
         try:
-            total_services = 4 if self.enable_mcp else 3
+            total_services = 3 + (1 if self.auto_start_mlx_server else 0) + (1 if self.enable_mcp else 0)
+            service_index = 1
 
             # 1. 启动 API Server
-            logger.info(f"📡 [1/{total_services}] Starting API Server...")
+            logger.info(f"📡 [{service_index}/{total_services}] Starting API Server...")
             env = os.environ.copy()
             env["API_PORT"] = str(self.api_port)
             env["OUTPUT_PATH"] = self.output_dir  # 设置输出目录（与 Worker 保持一致）
@@ -192,12 +309,21 @@ class TianshuLauncher:
             logger.info(f"   ✅ API Server started (PID: {api_proc.pid})")
             logger.info(f"   📖 API Docs: http://localhost:{self.api_port}/docs")
             logger.info("")
+            service_index += 1
+
+            if self.auto_start_mlx_server:
+                logger.info(f"🧠 [{service_index}/{total_services}] Starting MLX VLM Server...")
+                self._start_mlx_vlm_server()
+                logger.info("")
+                service_index += 1
 
             # 2. 启动 LitServe Worker Pool
-            logger.info(f"⚙️  [2/{total_services}] Starting LitServe Worker Pool...")
+            logger.info(f"⚙️  [{service_index}/{total_services}] Starting LitServe Worker Pool...")
             worker_env = os.environ.copy()
             worker_env["WORKER_PORT"] = str(self.worker_port)
             worker_env["OUTPUT_PATH"] = self.output_dir
+            worker_env["MLX_VLM_SERVER_URL"] = self.paddleocr_vl_mlx_server_url
+            worker_env["MLX_VLM_API_MODEL_NAME"] = str(Path(self.paddleocr_vl_mlx_model_path).expanduser().resolve())
 
             worker_cmd = [
                 sys.executable,
@@ -219,6 +345,7 @@ class TianshuLauncher:
                 worker_cmd.extend(["--paddleocr-vl-vllm-engine-enabled"])
             # 添加 paddleocr-vl-vllm-api-list 参数
             worker_cmd.extend(["--paddleocr-vl-vllm-api-list", str(self.paddleocr_vl_vllm_api_list)])
+            worker_cmd.extend(["--paddleocr-vl-mlx-server-url", self.paddleocr_vl_mlx_server_url])
             # 透传 MinerU VLM API 列表（此前从未传递，导致 native 模式 vlm-*/hybrid-* 拿不到远端端点）
             if self.mineru_vllm_api_list:
                 worker_cmd.extend(["--mineru-vllm-api-list", str(self.mineru_vllm_api_list)])
@@ -235,9 +362,10 @@ class TianshuLauncher:
             logger.info(f"   🔌 Worker Port: {self.worker_port}")
             logger.info(f"   👷 Workers per Device: {self.workers_per_device}")
             logger.info("")
+            service_index += 1
 
             # 3. 启动 Task Scheduler
-            logger.info(f"🔄 [3/{total_services}] Starting Task Scheduler...")
+            logger.info(f"🔄 [{service_index}/{total_services}] Starting Task Scheduler...")
             scheduler_cmd = [
                 sys.executable,
                 "task_scheduler.py",
@@ -256,10 +384,11 @@ class TianshuLauncher:
 
             logger.info(f"   ✅ Task Scheduler started (PID: {scheduler_proc.pid})")
             logger.info("")
+            service_index += 1
 
             # 4. 启动 MCP Server（可选）
             if self.enable_mcp:
-                logger.info(f"🔌 [4/{total_services}] Starting MCP Server...")
+                logger.info(f"🔌 [{service_index}/{total_services}] Starting MCP Server...")
                 mcp_env = os.environ.copy()
                 mcp_env["API_BASE_URL"] = f"http://localhost:{self.api_port}"
                 mcp_env["MCP_PORT"] = str(self.mcp_port)
@@ -478,6 +607,38 @@ def main():
         default=[],
         help='MinerU VLM (vlm-*/hybrid-*) 远端 API 列表（Python list 字面量格式）',
     )
+    parser.add_argument(
+        "--paddleocr-vl-mlx-server-url",
+        type=str,
+        default="http://127.0.0.1:8111/v1",
+        help="PaddleOCR-VL MLX server OpenAI-compatible URL (默认: http://127.0.0.1:8111/v1)",
+    )
+    parser.add_argument(
+        "--paddleocr-vl-mlx-model-path",
+        type=str,
+        default=str(
+            (
+                Path(__file__).parent
+                / "model"
+                / "paddlex_cache"
+                / "official_models"
+                / "PaddleOCR-VL-1.6-0.9B"
+            ).resolve()
+        ),
+        help="PaddleOCR-VL model path used by auto-started mlx-vlm server",
+    )
+    parser.add_argument(
+        "--auto-start-mlx-server",
+        action="store_true",
+        default=False,
+        help="自动使用 backend/.venv-mlx 拉起 mlx-vlm server",
+    )
+    parser.add_argument(
+        "--mlx-venv-path",
+        type=str,
+        default=str((Path(__file__).parent / ".venv-mlx").resolve()),
+        help="mlx-vlm 独立虚拟环境路径 (默认: backend/.venv-mlx)",
+    )
 
     args = parser.parse_args()
 
@@ -522,6 +683,10 @@ def main():
         mcp_port=args.mcp_port,
         paddleocr_vl_vllm_engine_enabled=args.paddleocr_vl_vllm_engine_enabled,
         paddleocr_vl_vllm_api_list=args.paddleocr_vl_vllm_api_list,
+        paddleocr_vl_mlx_server_url=args.paddleocr_vl_mlx_server_url,
+        paddleocr_vl_mlx_model_path=args.paddleocr_vl_mlx_model_path,
+        auto_start_mlx_server=args.auto_start_mlx_server,
+        mlx_venv_path=args.mlx_venv_path,
         mineru_vllm_api_list=args.mineru_vllm_api_list,
     )
 

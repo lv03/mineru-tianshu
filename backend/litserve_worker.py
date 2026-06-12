@@ -118,6 +118,7 @@ except ImportError:
 
 PADDLEOCR_VL_AVAILABLE = check_dependency("paddleocr_vl", "PaddleOCR-VL")
 PADDLEOCR_VL_VLLM_AVAILABLE = check_dependency("paddleocr_vl_vllm", "PaddleOCR-VL-VLLM")
+PADDLEOCR_VL_MLX_AVAILABLE = check_dependency("paddleocr_vl_mlx", "PaddleOCR-VL-MLX")
 MINERU_PIPELINE_AVAILABLE = check_dependency("mineru_pipeline", "MinerU Pipeline")
 SENSEVOICE_AVAILABLE = check_dependency("audio_engines", "SenseVoice")
 VIDEO_ENGINE_AVAILABLE = check_dependency("video_engines", "Video Engine")
@@ -213,6 +214,7 @@ class MinerUWorkerAPI(ls.LitAPI):
         poll_interval=0.5,
         enable_worker_loop=True,
         paddleocr_vl_vllm_engine_enabled=False,
+        paddleocr_vl_mlx_server_url=None,
     ):
         super().__init__()
 
@@ -228,6 +230,7 @@ class MinerUWorkerAPI(ls.LitAPI):
         # API 配置
         self.paddleocr_vl_vllm_engine_enabled = paddleocr_vl_vllm_engine_enabled
         self.paddleocr_vl_vllm_api_list = paddleocr_vl_vllm_api_list or []
+        self.paddleocr_vl_mlx_server_url = paddleocr_vl_mlx_server_url or os.getenv("MLX_VLM_SERVER_URL")
         self.mineru_vllm_api_list = mineru_vllm_api_list or []
 
         # 进程间共享计数器
@@ -327,6 +330,7 @@ class MinerUWorkerAPI(ls.LitAPI):
         self.mineru_pipeline_engine = None
         self.paddleocr_vl_engine = None
         self.paddleocr_vl_vllm_engine = None
+        self.paddleocr_vl_mlx_engine = None
         self.sensevoice_engine = None
         self.video_engine = None
         self.watermark_handler = None
@@ -444,7 +448,7 @@ class MinerUWorkerAPI(ls.LitAPI):
                 # 未勾选转换时的兜底校验：MinerU 仅能原生解析 .docx，PaddleOCR-VL 完全不支持 Office。
                 # 直接送进去会被 pdfium 当 PDF 打开而报难懂的 "Data format error"，故提前给出可操作提示。
                 is_mineru_backend = "pipeline" in backend or "vlm-" in backend or "hybrid-" in backend
-                is_paddle_backend = backend in ("paddleocr-vl", "paddleocr-vl-vllm")
+                is_paddle_backend = backend in ("paddleocr-vl", "paddleocr-vl-vllm", "paddleocr-vl-mlx")
                 if is_paddle_backend or (is_mineru_backend and file_ext != ".docx"):
                     raise ValueError(
                         f"{backend} 引擎无法直接解析 {file_ext} 文件，请在提交时勾选「Office 转 PDF 深度解析」后重试。"
@@ -479,12 +483,21 @@ class MinerUWorkerAPI(ls.LitAPI):
             elif backend == "paddleocr-vl":
                 if not PADDLEOCR_VL_AVAILABLE:
                     raise ValueError("PaddleOCR-VL not available")
-                result = self._process_with_paddleocr_vl(file_path, options)
+                if self.accelerator == "cpu" and PADDLEOCR_VL_MLX_AVAILABLE:
+                    logger.info("PaddleOCR-VL requested on CPU; routing to PaddleOCR-VL-MLX backend")
+                    result = self._process_with_paddleocr_vl_mlx(file_path, options)
+                else:
+                    result = self._process_with_paddleocr_vl(file_path, options)
 
             elif backend == "paddleocr-vl-vllm":
                 if not PADDLEOCR_VL_VLLM_AVAILABLE:
                     raise ValueError("PaddleOCR-VL-VLLM not available")
                 result = self._process_with_paddleocr_vl_vllm(file_path, options)
+
+            elif backend == "paddleocr-vl-mlx":
+                if not PADDLEOCR_VL_MLX_AVAILABLE:
+                    raise ValueError("PaddleOCR-VL-MLX not available")
+                result = self._process_with_paddleocr_vl_mlx(file_path, options)
 
             elif "pipeline" in backend or "vlm-" in backend or "hybrid-" in backend:
                 if not MINERU_PIPELINE_AVAILABLE:
@@ -719,6 +732,30 @@ class MinerUWorkerAPI(ls.LitAPI):
             "content": result.get("markdown", ""),
             "json_content": result.get("json_content"),  # 关键：支持右侧高亮
             "pdf_path": pdf_path,  # 关键：支持左侧预览
+        }
+
+    def _process_with_paddleocr_vl_mlx(self, file_path: str, options: dict) -> dict:
+        if self.paddleocr_vl_mlx_engine is None:
+            from paddleocr_vl_mlx import PaddleOCRVLMLXEngine
+
+            self.paddleocr_vl_mlx_engine = PaddleOCRVLMLXEngine(
+                mlx_server_url=self.paddleocr_vl_mlx_server_url,
+                model_name="PaddleOCR-VL-1.6-0.9B",
+            )
+
+        output_dir = Path(self.output_dir) / Path(file_path).stem
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        result = self.paddleocr_vl_mlx_engine.parse(file_path, output_path=str(output_dir), **options)
+
+        pdf_path = self._ensure_pdf_in_output(file_path, output_dir)
+        normalize_output(output_dir, handle_method="paddleocr-vl")
+
+        return {
+            "result_path": str(output_dir),
+            "content": result.get("markdown", ""),
+            "json_content": result.get("json_content"),
+            "pdf_path": pdf_path,
         }
 
     def _process_audio(self, file_path: str, options: dict) -> dict:
@@ -1083,6 +1120,7 @@ def start_litserve_workers(
     enable_worker_loop=True,
     paddleocr_vl_vllm_engine_enabled=False,
     paddleocr_vl_vllm_api_list=[],
+    paddleocr_vl_mlx_server_url=None,
     mineru_vllm_api_list=[],
 ):
     def resolve_auto_accelerator():
@@ -1110,6 +1148,7 @@ def start_litserve_workers(
         enable_worker_loop=enable_worker_loop,
         paddleocr_vl_vllm_engine_enabled=paddleocr_vl_vllm_engine_enabled,
         paddleocr_vl_vllm_api_list=paddleocr_vl_vllm_api_list,
+        paddleocr_vl_mlx_server_url=paddleocr_vl_mlx_server_url,
         mineru_vllm_api_list=mineru_vllm_api_list,
     )
 
@@ -1146,6 +1185,7 @@ if __name__ == "__main__":
     parser.add_argument("--disable-worker-loop", action="store_true")
     parser.add_argument("--paddleocr-vl-vllm-engine-enabled", action="store_true")
     parser.add_argument("--paddleocr-vl-vllm-api-list", type=parse_list_arg, default=[])
+    parser.add_argument("--paddleocr-vl-mlx-server-url", type=str, default=None)
     parser.add_argument("--mineru-vllm-api-list", type=parse_list_arg, default=[])
     args = parser.parse_args()
 
@@ -1180,5 +1220,6 @@ if __name__ == "__main__":
         enable_worker_loop=not args.disable_worker_loop,
         paddleocr_vl_vllm_engine_enabled=args.paddleocr_vl_vllm_engine_enabled,
         paddleocr_vl_vllm_api_list=args.paddleocr_vl_vllm_api_list,
+        paddleocr_vl_mlx_server_url=args.paddleocr_vl_mlx_server_url,
         mineru_vllm_api_list=args.mineru_vllm_api_list,
     )

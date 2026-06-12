@@ -921,8 +921,8 @@ async def list_engines():
     if importlib.util.find_spec("paddleocr_vl") is not None:
         engines["ocr"].append(
             {
-                "name": "paddleocr_vl",
-                "display_name": "PaddleOCR-VL v1.5 (0.9B)",
+                "name": "paddleocr-vl",
+                "display_name": "PaddleOCR-VL v1.6 (0.9B)",
                 "version": paddleocr_ver,
                 "supported_formats": [".pdf", ".png", ".jpg", ".jpeg"],
             }
@@ -933,6 +933,16 @@ async def list_engines():
             {
                 "name": "paddleocr-vl-vllm",
                 "display_name": "PaddleOCR-VL v1.5 (0.9B) (vLLM)",
+                "version": paddleocr_ver,
+                "supported_formats": [".pdf", ".png", ".jpg", ".jpeg"],
+            }
+        )
+
+    if importlib.util.find_spec("paddleocr_vl_mlx") is not None:
+        engines["ocr"].append(
+            {
+                "name": "paddleocr-vl-mlx",
+                "display_name": "PaddleOCR-VL v1.6 (0.9B) (MLX)",
                 "version": paddleocr_ver,
                 "supported_formats": [".pdf", ".png", ".jpg", ".jpeg"],
             }
