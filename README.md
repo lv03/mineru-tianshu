@@ -158,7 +158,7 @@
     - 质量过滤：拉普拉斯方差 + 亮度评估
     - 图像去重：感知哈希（pHash）+ 汉明距离
     - 文本去重：编辑距离算法避免重复内容
-    - 支持 PaddleOCR-VL 引擎
+    - 支持 PaddleOCR-VL 引擎（CUDA/vLLM/Apple Silicon MLX）
   - 支持多语言识别、说话人识别、情感识别
   - 输出带时间戳的文字稿（JSON 和 Markdown 格式）
   - 详见：`backend/video_engines/README.md`
@@ -343,7 +343,8 @@ npm run dev                  # http://localhost:3000
 - **pipeline**: MinerU 标准流程，通用文档解析
 - **vlm-transformers/vlm-vllm-engine**: MinerU VLM 模式
 <!-- - **deepseek-ocr**: DeepSeek OCR，高精度需求 -->
-- **paddleocr-vl**: 109+ 语言，自动方向矫正
+- **paddleocr-vl**: 109+ 语言，自动方向矫正；Mac CPU 模式自动路由到 MLX
+- **paddleocr-vl-mlx**: Apple Silicon 原生 PaddleOCR-VL，主进程 CPU + MLX/ANE VLM server
 
 ## 🎯 核心特性
 
@@ -367,6 +368,16 @@ python backend/start_all.py \
   --devices 0,1 \
   --workers-per-device 2 \
   --enable-mcp --mcp-port 8002
+```
+
+Apple Silicon 原生使用 PaddleOCR-VL：
+
+```bash
+cd backend
+python start_all.py \
+  --accelerator cpu \
+  --auto-start-mlx-server \
+  --paddleocr-vl-mlx-server-url http://127.0.0.1:8111/v1
 ```
 
 详见 [backend/README.md](backend/README.md)
@@ -455,6 +466,7 @@ cd /opt/tianshu
 - ✅ **完全离线**：所有模型（~15GB）和依赖预先打包
 - ✅ **一键部署**：自动配置环境变量、JWT 密钥、MinIO 对象存储
 - ✅ **Office 文档支持**：自动转换 .doc/.docx/.pptx 等格式为 PDF 后处理
+- ✅ **Apple Silicon MLX**：原生开发可通过独立 `mlx-vlm` server 使用 PaddleOCR-VL
 
 **关键修复**：
 - 🔧 Worker uploads 目录读写权限（支持 Office 转 PDF）

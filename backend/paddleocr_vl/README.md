@@ -6,9 +6,10 @@
 
 ## ⚠️ 重要提示
 
-- **仅支持 GPU**: PaddleOCR-VL 目前**不支持 CPU 及 Arm 架构**
-- **GPU 要求**: NVIDIA GPU with Compute Capability ≥ 8.5
-- **推荐 GPU**: RTX 3090, RTX 4090, A10, A100, H100
+- **CUDA 本地推理**: `paddleocr-vl` 后端需要 NVIDIA GPU，Compute Capability ≥ 8.5
+- **Apple Silicon**: 可使用 `paddleocr-vl-mlx` 后端，通过独立 `mlx-vlm` server 在 Apple Silicon 上执行 VLM 识别
+- **推荐 CUDA GPU**: RTX 3090, RTX 4090, A10, A100, H100
+- **依赖隔离**: `mlx-vlm >= 0.4.2` 需要 `transformers>=5.1`，与 MinerU 3.2.3 的 `transformers<5.0` 约束冲突，必须安装到独立 venv
 
 ## ✨ 特性
 
@@ -18,7 +19,7 @@
 - ✅ **文本图像矫正**: 修正拍照导致的变形、透视扭曲
 - ✅ **版面区域检测**: 智能识别和排序，保持内容逻辑结构
 - ✅ **自动语言识别**: 支持 109+ 语言，无需手动指定
-- ✅ **GPU 加速**: 仅支持 GPU 推理，性能强劲
+- ✅ **硬件加速**: 支持 NVIDIA GPU 本地推理，也支持 Apple Silicon 通过 MLX server 执行 VLM 识别
 - ✅ **单例模式**: 每个进程只加载一次模型，节省资源
 - ✅ **PDF 原生支持**: 无需手动转换，直接处理 PDF 多页文档
 - ✅ **结构化输出**: 支持 Markdown、JSON 等多种输出格式
@@ -88,6 +89,73 @@ python check_environment.py
 - ✅ 依赖包安装情况
 - ✅ 模型文件完整性
 
+## Apple Silicon (MLX) 部署
+
+Apple Silicon 使用两个 Python 环境：
+
+- 主环境：运行 MinerU Tianshu、PaddleOCR/PaddleX、LitServe Worker
+- MLX 环境：只运行 `mlx-vlm` OpenAI-compatible server
+
+### 1. 创建独立 MLX venv
+
+```bash
+cd backend
+python3 -m venv .venv-mlx
+.venv-mlx/bin/python -m pip install -U pip
+.venv-mlx/bin/python -m pip install "mlx-vlm>=0.4.2"
+```
+
+不要把 `mlx-vlm` 安装进主 `.venv`，否则会因为 `transformers` 版本约束影响 MinerU。
+
+### 2. 准备模型
+
+默认使用仓库内模型路径：
+
+```bash
+backend/model/paddlex_cache/official_models/PaddleOCR-VL-1.6-0.9B
+```
+
+也可以通过 `--paddleocr-vl-mlx-model-path` 指向其他本地模型目录。
+
+### 3. 启动方式
+
+推荐由 `start_all.py` 自动托管 MLX server：
+
+```bash
+cd backend
+python start_all.py \
+  --accelerator cpu \
+  --auto-start-mlx-server \
+  --paddleocr-vl-mlx-server-url http://127.0.0.1:8111/v1
+```
+
+也可以手动启动 server：
+
+```bash
+cd backend
+.venv-mlx/bin/python -m mlx_vlm.server \
+  --host 127.0.0.1 \
+  --port 8111 \
+  --model model/paddlex_cache/official_models/PaddleOCR-VL-1.6-0.9B \
+  --trust-remote-code
+```
+
+然后启动主服务：
+
+```bash
+python start_all.py \
+  --accelerator cpu \
+  --paddleocr-vl-mlx-server-url http://127.0.0.1:8111/v1
+```
+
+提交任务时指定：
+
+```bash
+curl -X POST http://localhost:8000/api/v1/tasks/submit \
+  -F "file=@document.pdf" \
+  -F "backend=paddleocr-vl-mlx"
+```
+
 ## 🚀 使用
 
 ### API 调用
@@ -104,9 +172,9 @@ curl -X POST http://localhost:8000/api/v1/tasks/submit \
 
 | 参数 | 说明 | 可选值 | 默认值 |
 |------|------|--------|--------|
-| `backend` | 解析引擎 | `pipeline` / `paddleocr-vl` | `pipeline` |
+| `backend` | 解析引擎 | `pipeline` / `paddleocr-vl` / `paddleocr-vl-mlx` | `pipeline` |
 
-**注意**: PaddleOCR-VL 新版本会自动识别语言，无需指定 `paddleocr_lang` 参数。模型由 PaddleOCR 自动管理，缓存在 `~/.paddleocr/models/` 目录。
+**注意**: PaddleOCR-VL 新版本会自动识别语言，无需指定 `paddleocr_lang` 参数。CUDA 本地模式可由 PaddleOCR 自动管理模型缓存；MLX 模式使用 `--paddleocr-vl-mlx-model-path` 指定本地模型目录。
 
 ## 🌍 支持的语言
 
@@ -129,8 +197,9 @@ PaddleOCR-VL 新版本支持 **109+ 种语言的自动识别**，包括但不限
 
 **模型管理说明：**
 
-- **自动管理**: 模型由 PaddleOCR 自动下载和管理，无需手动操作
-- **缓存位置**: `~/.paddleocr/models/` 目录（由 PaddleOCR 自动创建）
+- **CUDA 本地模式**: 模型可由 PaddleOCR 自动下载和管理，无需手动操作
+- **CUDA 缓存位置**: `~/.paddleocr/models/` 目录（由 PaddleOCR 自动创建）
+- **MLX 模式**: 使用 `backend/model/paddlex_cache/official_models/PaddleOCR-VL-1.6-0.9B`，可通过 `--paddleocr-vl-mlx-model-path` 覆盖
 - **首次使用**: 自动下载模型（约 2GB）
 - **下载源**: 从 Hugging Face 或 ModelScope 自动下载
 - **加载时机**: 首次使用时自动下载并加载到内存
@@ -183,11 +252,13 @@ output/
 | Backend | 引擎 | 特点 | 适用场景 | GPU 需求 |
 |---------|------|------|----------|----------|
 | `pipeline` | MinerU | 完整文档解析，支持表格、公式 | 通用文档 | 建议使用 |
-| `paddleocr-vl` | PaddleOCR-VL | 100+ 语言，视觉-语言大模型 | 多语言文档 | **必须使用** |
+| `paddleocr-vl` | PaddleOCR-VL | 100+ 语言，CUDA 本地推理 | 多语言文档 | **必须使用 NVIDIA GPU** |
+| `paddleocr-vl-mlx` | PaddleOCR-VL + MLX | Apple Silicon 原生 VLM 识别 | Mac 原生开发、多语言文档 | **Apple Silicon** |
 
 ### 选择建议
 
-- **多语言文档识别** → 选择 `paddleocr-vl`（需要 GPU）
+- **多语言文档识别（NVIDIA GPU）** → 选择 `paddleocr-vl`
+- **多语言文档识别（Apple Silicon）** → 选择 `paddleocr-vl-mlx`
 - **完整文档解析** → 选择 `pipeline`（MinerU，需要 GPU）
 
 ## 🎯 性能对比
@@ -195,7 +266,8 @@ output/
 | Backend | CPU 支持 | GPU 加速 | 多语言 | 表格识别 | 公式识别 |
 |---------|---------|---------|--------|---------|---------|
 | MinerU | ❌ | ✅ | ✅ | ✅ | ✅ |
-| PaddleOCR-VL | ❌ | ✅ (必需) | ✅✅ (109+) | ✅ | ✅ |
+| PaddleOCR-VL | ❌ | ✅ NVIDIA GPU | ✅✅ (109+) | ✅ | ✅ |
+| PaddleOCR-VL-MLX | ✅ CPU 版面检测 + MLX VLM server | ✅ Apple Silicon MLX/ANE | ✅✅ (109+) | ✅ | ✅ |
 
 ## 💡 示例
 
@@ -254,18 +326,18 @@ python -c "import paddle; print(paddle.device.is_compiled_with_cuda())"
 
 ### 模型缓存
 
-PaddleOCR-VL 会自动管理模型缓存：
+CUDA 本地模式下，PaddleOCR-VL 会自动管理模型缓存：
 
 - **默认位置**: `~/.paddleocr/models/`
 - **自动下载**: 首次使用时自动下载
 - **缓存复用**: 后续使用直接从缓存加载
-- **无需配置**: 不支持手动指定模型路径
+- **MLX 模式**: 不使用该自动缓存路径，解析调用的模型由 `MLX_VLM_API_MODEL_NAME` 或 `--paddleocr-vl-mlx-model-path` 指定
 
 ## 📝 注意事项
 
-1. **首次使用**: 首次使用时会自动下载模型文件（约 2GB），请耐心等待并确保网络畅通
-2. **模型管理**: 模型由 PaddleOCR 自动管理，缓存在 `~/.paddleocr/models/`，不支持手动指定路径
-3. **GPU 需求**: PaddleOCR-VL 仅支持 GPU 推理，不支持 CPU 模式
+1. **首次使用**: CUDA 本地模式首次使用时会自动下载模型文件，请耐心等待并确保网络畅通
+2. **模型管理**: CUDA 本地模式使用 PaddleOCR 缓存；MLX 模式使用显式本地模型路径
+3. **硬件需求**: `paddleocr-vl` CUDA 本地推理需要 NVIDIA GPU；Apple Silicon 原生开发请使用 `paddleocr-vl-mlx` 或在 CPU 模式下选择 `paddleocr-vl` 自动路由到 MLX
 4. **显存占用**: GPU 模式需要足够的显存
 5. **识别精度**: 对于复杂版面，建议使用 `pipeline`
 

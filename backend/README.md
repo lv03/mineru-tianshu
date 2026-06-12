@@ -72,7 +72,7 @@ POST /api/v1/tasks/submit
 
 参数:
   - file: 文件 (必需)
-  - backend: pipeline | vlm-transformers | vllm-engine | paddleocr-vl (默认: pipeline)
+  - backend: pipeline | vlm-auto-engine | hybrid-auto-engine | paddleocr-vl | paddleocr-vl-vllm | paddleocr-vl-mlx (默认: pipeline)
   - lang: ch | en | korean | japan (默认: ch)
   - method: auto | txt | ocr (默认: auto)
   - formula_enable: boolean (默认: true)
@@ -259,7 +259,9 @@ export MINERU_VIRTUAL_VRAM_SIZE=6
 | 引擎 | 名称 | 特点 | 适用场景 |
 |------|------|------|----------|
 | `pipeline` | MinerU Pipeline | 完整文档解析，支持表格、公式 | 通用文档处理 |
-| `paddleocr-vl` | PaddleOCR-VL | 多语言 OCR，自动方向矫正 | 多语言文档 |
+| `paddleocr-vl` | PaddleOCR-VL | 多语言 OCR，自动方向矫正；Mac CPU 模式自动走 MLX | 多语言文档 |
+| `paddleocr-vl-vllm` | PaddleOCR-VL vLLM | CUDA 版面检测 + 远程 vLLM 识别 | GPU 服务化部署 |
+| `paddleocr-vl-mlx` | PaddleOCR-VL MLX | CPU 版面检测 + Apple Silicon MLX/ANE 识别 | Mac 原生开发 |
 | `sensevoice` | SenseVoice | 音频转文字，说话人识别 | 音频处理 |
 | `video` | Video Engine | 视频处理，关键帧 OCR | 视频分析 |
 | `fasta` | FASTA Engine | 生物序列格式解析 | 生物信息学 |
@@ -280,8 +282,22 @@ export MINERU_VIRTUAL_VRAM_SIZE=6
 ### 多解析器支持
 
 - **MinerU**: 完整文档解析，支持表格、公式等 (GPU 加速)
-- **PaddleOCR-VL**: 高精度视觉语言模型 OCR (可选)
+- **PaddleOCR-VL**: 高精度视觉语言模型 OCR；支持 CUDA 本地、vLLM 服务化、Apple Silicon MLX server
 - **MarkItDown**: 处理 Office、HTML、文本等 (快速处理)
+
+### Apple Silicon PaddleOCR-VL
+
+Mac 原生开发可通过独立 `mlx-vlm` server 使用 PaddleOCR-VL：
+
+```bash
+cd backend
+python start_all.py \
+  --accelerator cpu \
+  --auto-start-mlx-server \
+  --paddleocr-vl-mlx-server-url http://127.0.0.1:8111/v1
+```
+
+`mlx-vlm` 需要单独安装在 `backend/.venv-mlx`，不要装进主 `.venv`，因为它依赖的 `transformers>=5.1` 与 MinerU 主环境冲突。提交任务时可以选择 `paddleocr-vl`（CPU 模式自动路由到 MLX）或显式选择 `paddleocr-vl-mlx`。
 
 ### 自动清理
 
