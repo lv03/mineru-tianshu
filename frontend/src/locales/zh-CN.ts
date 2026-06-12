@@ -226,9 +226,11 @@ export default {
     backendHybridHttpClientHint: '☁️ 连接远程服务器，结合本地预处理与远程推理',
 
     backendPaddleOcrVl1509b: 'PaddleOCR-VL（多语言 OCR，109+ 语言）',
-    backendPaddleOcrVl09bHint: '🌏 PaddleOCR-VL: 自动多语言识别，支持文档方向校正、文本矫正、版面检测',
+    backendPaddleOcrVl09bHint: '🌏 PaddleOCR-VL: NVIDIA GPU 走 CUDA，本机 Mac/CPU 会自动路由到 MLX 后端',
     backendPaddleOCRVLLM: 'PaddleOCR-VL-VLLM（高性能多语言 OCR）',
     backendPaddleOCRVLLMHint: '🚀 PaddleOCR-VL-VLLM: 基于 vLLM 的高性能多语言 OCR',
+    backendPaddleOCRMLX: 'PaddleOCR-VL-MLX（Apple Silicon）',
+    backendPaddleOCRMLXHint: '🍎 PaddleOCR-VL-MLX: 通过独立 mlx-vlm server 在 Apple Silicon 上运行 PaddleOCR-VL',
     backendSenseVoice: 'SenseVoice（语音识别，说话人识别）',
     backendSenseVoiceHint: '🎙️ SenseVoice: 支持多语言语音识别、自动说话人识别、情感识别',
     backendVideo: 'Video（视频转文字，提取音频+语音识别）',

@@ -192,6 +192,10 @@ const layoutData = computed(() => {
   const extractV2Text = (block: any): string => {
       // 1. 扁平格式 (content_list_v1 / vlm)：直接带 text 字段
       if (typeof block.text === 'string' && block.text) return block.text
+      // PaddleOCR-VL page JSON uses block_content/block_label/block_bbox.
+      if (typeof block.block_content === 'string' && block.block_content) return block.block_content
+      if (typeof block.html === 'string' && block.html) return block.html
+      if (typeof block.markdown === 'string' && block.markdown) return block.markdown
 
       const c = block.content
       if (!c) return ''
@@ -256,7 +260,7 @@ const layoutData = computed(() => {
   }
 
   // 双向定位视图中无需展示的版面噪声块（页码等），按需在此扩展（如 'page_header'/'page_aside_text'）
-  const HIDDEN_BLOCK_TYPES = new Set(['page_number'])
+  const HIDDEN_BLOCK_TYPES = new Set(['page_number', 'number'])
 
   const formattedBlocks = flatBlocks
       .filter((b) => !HIDDEN_BLOCK_TYPES.has(b.type ?? b.block_label))

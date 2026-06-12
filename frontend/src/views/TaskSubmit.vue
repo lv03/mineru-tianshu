@@ -110,6 +110,7 @@
                     <optgroup :label="$t('task.groupPaddleOCR')">
                       <option value="paddleocr-vl">{{ $t('task.backendPaddleOcrVl1509b') }}</option>
                       <option value="paddleocr-vl-vllm">{{ $t('task.backendPaddleOCRVLLM') }}</option>
+                      <option value="paddleocr-vl-mlx">{{ $t('task.backendPaddleOCRMLX') }}</option>
                     </optgroup>
 
                     <optgroup :label="$t('task.groupAudioVideo')">
@@ -225,7 +226,7 @@
                   <p class="mt-1 text-[10px] text-gray-400">{{ $t('task.pageRangeHint') }}</p>
                 </div>
 
-                <div v-if="['pipeline', 'paddleocr-vl', 'paddleocr-vl-vllm', 'auto'].includes(config.backend)">
+                <div v-if="['pipeline', 'paddleocr-vl', 'paddleocr-vl-vllm', 'paddleocr-vl-mlx', 'auto'].includes(config.backend)">
                    <label class="block text-xs font-bold text-gray-600 uppercase tracking-wide mb-2">{{ $t('task.preprocessing') }}</label>
                    <div class="grid grid-cols-1 gap-3">
                       <div class="border border-gray-200 rounded p-3 bg-white">
@@ -266,7 +267,7 @@
                    </div>
                 </div>
 
-                <div v-if="['paddleocr-vl', 'paddleocr-vl-vllm'].includes(config.backend)">
+                <div v-if="['paddleocr-vl', 'paddleocr-vl-vllm', 'paddleocr-vl-mlx'].includes(config.backend)">
                    <label class="block text-xs font-bold text-green-600 uppercase tracking-wide mb-2">
                      {{ $t('task.paddleOCROptions') }}
                    </label>
@@ -542,7 +543,7 @@ const mineruBackends = ['pipeline', 'vlm-auto-engine', 'hybrid-auto-engine', 'vl
 const isMinerUBackend = computed(() => mineruBackends.includes(config.backend))
 const isHttpClientBackend = computed(() => ['vlm-http-client', 'hybrid-http-client'].includes(config.backend))
 
-const showLanguageOption = computed(() => isMinerUBackend.value || ['paddleocr-vl', 'paddleocr-vl-vllm', 'sensevoice', 'auto'].includes(config.backend))
+const showLanguageOption = computed(() => isMinerUBackend.value || ['paddleocr-vl', 'paddleocr-vl-vllm', 'paddleocr-vl-mlx', 'sensevoice', 'auto'].includes(config.backend))
 
 // 动态 Hint
 const currentBackendHint = computed(() => {
@@ -555,6 +556,7 @@ const currentBackendHint = computed(() => {
     'hybrid-http-client': t('task.backendHybridHttpClientHint'),
     'paddleocr-vl': t('task.backendPaddleOcrVl09bHint'),
     'paddleocr-vl-vllm': t('task.backendPaddleOCRVLLMHint'),
+    'paddleocr-vl-mlx': t('task.backendPaddleOCRMLXHint'),
     'sensevoice': t('task.backendSenseVoiceHint'),
     'video': t('task.backendVideoHint'),
     'fasta': t('task.backendFastaHint'),
