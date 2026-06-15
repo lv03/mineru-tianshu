@@ -151,10 +151,11 @@ class PaddleOCRVLVLLMEngine:
             except Exception:
                 pass
 
-    def parse(self, file_path: str, output_path: str, **kwargs) -> Dict[str, Any]:
+    def parse(self, file_path: str, output_path: str, reuse_pipeline: bool = False, **kwargs) -> Dict[str, Any]:
         """
         解析文档入口
         """
+        pipeline_reusable = False
         try:
             file_path = Path(file_path)
             output_path = Path(output_path)
@@ -162,8 +163,9 @@ class PaddleOCRVLVLLMEngine:
 
             logger.info(f"🤖 Processing: {file_path.name}")
 
-            # 每次任务重新加载，防止状态被上一个任务污染导致 NoneType 崩溃
-            self.cleanup()
+            # 普通任务仍每次重建，防止跨任务状态污染；视频关键帧 OCR 可在同一任务内复用。
+            if not reuse_pipeline:
+                self.cleanup()
             pipeline = self._load_pipeline()
 
             # 参数映射
@@ -299,6 +301,7 @@ class PaddleOCRVLVLLMEngine:
             # =========================================================
             try:
                 process_stream(predict_params, pipeline)
+                pipeline_reusable = True
             except Exception as e:
                 logger.warning(f"⚠️ Standard stream failed (Pipeline state corrupted?): {e}")
                 logger.info("🔄 Re-initializing and retrying with safe fallback parameters...")
@@ -312,8 +315,10 @@ class PaddleOCRVLVLLMEngine:
 
                 try:
                     process_stream(predict_params, pipeline)
+                    pipeline_reusable = True
                 except Exception as fallback_e:
                     logger.error(f"❌ Fallback prediction also failed: {fallback_e}")
+                    self.cleanup()
                     raise RuntimeError(f"VLM Worker crashed during generation. Internal Error: {fallback_e}")
 
             # 合并结果
@@ -350,11 +355,16 @@ class PaddleOCRVLVLLMEngine:
         except Exception as e:
             logger.error(f"❌ OCR Pipeline Critical Error: {e}")
             logger.error(traceback.format_exc())
+            pipeline_reusable = False
+            self.cleanup()
             raise
         finally:
-            # 强制清理！这是多任务稳定运行的核心生命线
-            self.cleanup()
-            logger.info("🏁 Task finished. Pipeline cleaned up securely.")
+            if reuse_pipeline and pipeline_reusable:
+                logger.info("🏁 Task finished. Pipeline retained for current video OCR batch.")
+            else:
+                # 强制清理！这是多任务稳定运行的核心生命线
+                self.cleanup()
+                logger.info("🏁 Task finished. Pipeline cleaned up securely.")
 
 
 # 全局单例

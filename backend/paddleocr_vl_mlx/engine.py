@@ -108,20 +108,35 @@ class PaddleOCRVLMLXEngine(PaddleOCRVLVLLMEngine):
 
                 default_paddlex_home = Path(__file__).resolve().parent.parent / "model" / "paddlex_cache"
                 os.environ.setdefault("PADDLEX_HOME", str(default_paddlex_home))
+                vl_rec_max_concurrency = self._vl_rec_max_concurrency()
 
                 self._pipeline = PaddleOCRVL(
                     vl_rec_backend="mlx-vlm-server",
                     vl_rec_server_url=self.mlx_server_url,
                     vl_rec_api_model_name=self.api_model_name,
+                    vl_rec_max_concurrency=vl_rec_max_concurrency,
                 )
 
                 logger.info("PaddleOCR-VL-MLX pipeline loaded successfully")
+                logger.info(f"   VLM request concurrency: {vl_rec_max_concurrency}")
                 return self._pipeline
 
             except Exception as e:
                 logger.error(f"PaddleOCR-VL-MLX pipeline load failed: {e}")
                 logger.error(traceback.format_exc())
                 raise
+
+    def _vl_rec_max_concurrency(self) -> int:
+        value = os.getenv("PADDLEOCR_VL_REC_MAX_CONCURRENCY", "1")
+        try:
+            concurrency = int(value)
+        except ValueError:
+            logger.warning(f"Invalid PADDLEOCR_VL_REC_MAX_CONCURRENCY={value!r}; using 1")
+            return 1
+        if concurrency < 1:
+            logger.warning(f"PADDLEOCR_VL_REC_MAX_CONCURRENCY must be >= 1, got {concurrency}; using 1")
+            return 1
+        return concurrency
 
     def cleanup(self):
         with self._lock:

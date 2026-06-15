@@ -426,7 +426,7 @@ async def submit_task(
     keep_audio: bool = Form(False, description="视频处理时是否保留提取的音频文件"),
     enable_keyframe_ocr: bool = Form(False, description="是否启用视频关键帧OCR识别（实验性功能）"),
     ocr_backend: str = Form("paddleocr-vl", description="关键帧OCR引擎: paddleocr-vl"),
-    keep_keyframes: bool = Form(False, description="是否保留提取的关键帧图像"),
+    keep_keyframes: bool = Form(True, description="是否保留提取的关键帧图像"),
     enable_speaker_diarization: bool = Form(False, description="是否启用说话人分离"),
     remove_watermark: bool = Form(False, description="是否启用水印去除"),
     watermark_conf_threshold: float = Form(0.35, description="水印检测置信度阈值"),

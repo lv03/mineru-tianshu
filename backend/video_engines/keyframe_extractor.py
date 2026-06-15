@@ -3,6 +3,10 @@
 场景检测 → 质量过滤 → 图像去重 → OCR
 """
 
+import importlib.util
+import os
+import platform
+import re
 import cv2
 import numpy as np
 from pathlib import Path
@@ -32,13 +36,19 @@ class KeyframeExtractor:
         self,
         scene_threshold: float = 30.0,
         min_scene_length: float = 1.0,
-        quality_threshold: float = 100.0,
+        quality_threshold: float = 30.0,
+        contrast_threshold: float = 12.0,
+        changed_ratio_threshold: float = 0.05,
+        pixel_diff_threshold: int = 20,
         phash_threshold: int = 5,
-        brightness_range: Tuple[int, int] = (30, 225),
+        brightness_range: Tuple[int, int] = (10, 248),
     ):
         self.scene_threshold = scene_threshold
         self.min_scene_length = min_scene_length
         self.quality_threshold = quality_threshold
+        self.contrast_threshold = contrast_threshold
+        self.changed_ratio_threshold = changed_ratio_threshold
+        self.pixel_diff_threshold = pixel_diff_threshold
         self.phash_threshold = phash_threshold
         self.brightness_range = brightness_range
 
@@ -104,9 +114,10 @@ class KeyframeExtractor:
                 # 计算帧差异
                 diff = cv2.absdiff(small, prev_frame)
                 diff_score = np.mean(diff)
+                changed_ratio = np.mean(diff > self.pixel_diff_threshold)
 
-                # 检测场景变化
-                if diff_score > self.scene_threshold:
+                # 检测场景变化：自然视频看平均帧差，屏幕录制/课程视频看局部变化比例
+                if diff_score > self.scene_threshold or changed_ratio > self.changed_ratio_threshold:
                     # 确保最小场景长度
                     if frame_count - last_scene_frame >= min_frames:
                         timestamp = frame_count / fps
@@ -160,6 +171,9 @@ class KeyframeExtractor:
     def _filter_quality(self, keyframes: List[KeyFrame]) -> List[KeyFrame]:
         """图像质量过滤"""
         quality_frames = []
+        rejected_blank = 0
+        rejected_low_quality = 0
+        stats = []
 
         for kf in keyframes:
             # 读取图像
@@ -173,20 +187,44 @@ class KeyframeExtractor:
 
             # 评估亮度
             brightness = np.mean(gray)
+            contrast = np.std(gray)
+            stats.append((sharpness, brightness, contrast))
 
-            # 质量评分
-            is_sharp = sharpness >= self.quality_threshold
-            is_bright = self.brightness_range[0] <= brightness <= self.brightness_range[1]
+            is_blank = (
+                brightness < self.brightness_range[0] and contrast < self.contrast_threshold
+            ) or (
+                brightness > self.brightness_range[1] and contrast < self.contrast_threshold
+            )
+            has_ocr_signal = sharpness >= self.quality_threshold or contrast >= self.contrast_threshold
 
-            if is_sharp and is_bright:
+            if not is_blank and has_ocr_signal:
                 kf.quality_score = sharpness
                 quality_frames.append(kf)
             else:
+                if is_blank:
+                    rejected_blank += 1
+                else:
+                    rejected_low_quality += 1
                 # 删除低质量图像
                 try:
                     Path(kf.image_path).unlink()
                 except Exception:
                     pass
+
+        if stats:
+            sharpness_values = np.array([s[0] for s in stats])
+            brightness_values = np.array([s[1] for s in stats])
+            contrast_values = np.array([s[2] for s in stats])
+            logger.info(
+                "   质量统计: "
+                f"sharpness min/median/max={sharpness_values.min():.1f}/"
+                f"{np.median(sharpness_values):.1f}/{sharpness_values.max():.1f}, "
+                f"brightness min/median/max={brightness_values.min():.1f}/"
+                f"{np.median(brightness_values):.1f}/{brightness_values.max():.1f}, "
+                f"contrast min/median/max={contrast_values.min():.1f}/"
+                f"{np.median(contrast_values):.1f}/{contrast_values.max():.1f}"
+            )
+            logger.info(f"   过滤原因: 空白/极端亮暗 {rejected_blank} 帧，低质量 {rejected_low_quality} 帧")
 
         return quality_frames
 
@@ -254,7 +292,14 @@ class VideoOCREngine:
         if self._ocr_engine is not None:
             return self._ocr_engine
 
-        if self.ocr_backend == "paddleocr-vl":
+        if self.ocr_backend == "paddleocr-vl-mlx" or (
+            self.ocr_backend == "paddleocr-vl" and self._should_route_to_mlx()
+        ):
+            logger.info("PaddleOCR-VL keyframe OCR requested on Apple Silicon/MLX; routing to PaddleOCR-VL-MLX")
+            from paddleocr_vl_mlx import PaddleOCRVLMLXEngine
+
+            self._ocr_engine = PaddleOCRVLMLXEngine()
+        elif self.ocr_backend == "paddleocr-vl":
             from paddleocr_vl import PaddleOCRVLEngine
 
             self._ocr_engine = PaddleOCRVLEngine()
@@ -262,6 +307,15 @@ class VideoOCREngine:
             raise ValueError(f"不支持的 OCR 引擎: {self.ocr_backend}")
 
         return self._ocr_engine
+
+    def _should_route_to_mlx(self) -> bool:
+        if importlib.util.find_spec("paddleocr_vl_mlx") is None:
+            return False
+
+        if os.getenv("MLX_VLM_SERVER_URL"):
+            return True
+
+        return platform.system() == "Darwin" and platform.machine().lower() in {"arm64", "aarch64"}
 
     def process(self, video_path: str, output_path: str) -> Dict[str, Any]:
         """
@@ -293,12 +347,23 @@ class VideoOCREngine:
 
                 try:
                     # 调用 OCR 引擎
-                    ocr_result = ocr_engine.parse(file_path=kf.image_path, output_path=str(temp_dir))
+                    frame_output_dir = temp_dir / f"ocr_frame_{idx + 1:04d}"
+                    frame_output_dir.mkdir(parents=True, exist_ok=True)
+                    ocr_result = ocr_engine.parse(
+                        file_path=kf.image_path,
+                        output_path=str(frame_output_dir),
+                        reuse_pipeline=True,
+                    )
 
                     # 提取文字内容
                     ocr_text = ""
                     if ocr_result.get("markdown"):
-                        ocr_text = ocr_result["markdown"]
+                        ocr_text = self._normalize_ocr_markdown_assets(
+                            markdown=ocr_result["markdown"],
+                            frame_output_dir=frame_output_dir,
+                            output_path=output_path,
+                            frame_index=idx + 1,
+                        )
                     elif ocr_result.get("json_data"):
                         # 从 JSON 提取文字
                         json_data = ocr_result["json_data"]
@@ -365,6 +430,12 @@ class VideoOCREngine:
             }
 
         finally:
+            if self._ocr_engine and hasattr(self._ocr_engine, "cleanup"):
+                try:
+                    self._ocr_engine.cleanup()
+                    logger.info("🧹 Keyframe OCR engine cleaned up")
+                except Exception as e:
+                    logger.warning(f"关键帧 OCR 引擎清理失败: {e}")
             # 清理临时文件
             if not self.keep_keyframes:
                 try:
@@ -400,6 +471,96 @@ class VideoOCREngine:
                 unique_results.append(result)
 
         return unique_results
+
+    def _normalize_ocr_markdown_assets(
+        self,
+        markdown: str,
+        frame_output_dir: Path,
+        output_path: Path,
+        frame_index: int,
+    ) -> str:
+        """
+        将单帧 OCR Markdown 中的图片引用转换为最终输出可访问的路径。
+
+        PaddleOCR-VL 有时会在 Markdown 中生成 `imgs/...` 引用，但对应裁剪图并未落盘。
+        这里能找到就复制到根 images/，找不到就移除引用，避免前端请求不存在文件。
+        """
+        if not markdown:
+            return markdown
+
+        image_dir = output_path / "images"
+        copied: Dict[str, str] = {}
+
+        def resolve_image(src: str) -> Path | None:
+            clean_src = src.split("?", 1)[0].split("#", 1)[0]
+            src_path = Path(clean_src)
+            if src_path.is_absolute():
+                return src_path if src_path.exists() and src_path.is_file() else None
+
+            candidates = [
+                frame_output_dir / clean_src,
+                frame_output_dir / "page_1" / clean_src,
+                output_path / clean_src,
+            ]
+            for candidate in candidates:
+                if candidate.exists() and candidate.is_file():
+                    return candidate
+
+            basename = src_path.name
+            if basename:
+                for candidate in frame_output_dir.rglob(basename):
+                    if candidate.is_file():
+                        return candidate
+
+            return None
+
+        def copy_image(src: str) -> str | None:
+            if src in copied:
+                return copied[src]
+
+            source = resolve_image(src)
+            if source is None:
+                logger.debug(f"移除不存在的关键帧 OCR 图片引用: {src}")
+                return None
+
+            image_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = f"keyframe_{frame_index:04d}_{source.name}"
+            dest = image_dir / safe_name
+
+            if dest.exists() and source.resolve() != dest.resolve():
+                stem = dest.stem
+                suffix = dest.suffix
+                counter = 1
+                while dest.exists() and source.resolve() != dest.resolve():
+                    dest = image_dir / f"{stem}_{counter}{suffix}"
+                    counter += 1
+
+            if not dest.exists():
+                shutil.copy2(source, dest)
+
+            new_src = f"images/{dest.name}"
+            copied[src] = new_src
+            return new_src
+
+        def replace_markdown_image(match):
+            alt_text = match.group(1)
+            src = match.group(2)
+            new_src = copy_image(src)
+            if not new_src:
+                return ""
+            return f"![{alt_text}]({new_src})"
+
+        def replace_html_image(match):
+            tag = match.group(0)
+            src = match.group(2)
+            new_src = copy_image(src)
+            if not new_src:
+                return ""
+            return tag.replace(src, new_src, 1)
+
+        markdown = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", replace_markdown_image, markdown)
+        markdown = re.sub(r'<img\s+([^>]*?\s+)?src="([^"]+)"([^>]*)>', replace_html_image, markdown)
+        return markdown
 
     def _generate_markdown(self, results: List[Dict], video_name: str) -> str:
         """生成 Markdown 输出"""
