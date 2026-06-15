@@ -111,6 +111,14 @@ function onDrop(event: DragEvent) {
 }
 
 function addFiles(newFiles: File[]) {
+  newFiles = newFiles.filter(file => {
+    if (!isAcceptedFile(file)) {
+      alert(t('uploader.invalidFileType', { name: file.name }))
+      return false
+    }
+    return true
+  })
+
   // 验证文件大小
   if (props.maxSize) {
     newFiles = newFiles.filter(file => {
@@ -122,6 +130,8 @@ function addFiles(newFiles: File[]) {
     })
   }
 
+  if (newFiles.length === 0) return
+
   if (props.multiple) {
     files.value = [...files.value, ...newFiles]
   } else {
@@ -129,6 +139,26 @@ function addFiles(newFiles: File[]) {
   }
 
   emit('update:files', files.value)
+}
+
+function isAcceptedFile(file: File) {
+  if (!props.accept || props.accept === '*') return true
+
+  const acceptRules = props.accept
+    .split(',')
+    .map(rule => rule.trim().toLowerCase())
+    .filter(Boolean)
+
+  if (acceptRules.length === 0) return true
+
+  const fileName = file.name.toLowerCase()
+  const fileType = file.type.toLowerCase()
+
+  return acceptRules.some(rule => {
+    if (rule.startsWith('.')) return fileName.endsWith(rule)
+    if (rule.endsWith('/*')) return fileType.startsWith(rule.slice(0, -1))
+    return fileType === rule
+  })
 }
 
 function removeFile(index: number) {

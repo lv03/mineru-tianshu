@@ -29,6 +29,7 @@
             <FileUploader
               ref="fileUploader"
               :multiple="true"
+              :accept="supportedUploadAccept"
               :acceptHint="$t('task.supportedFormatsHint')"
               @update:files="onFilesChange"
               class="flex-1"
@@ -463,6 +464,40 @@ const submitting = ref(false)
 const errorMessage = ref('')
 const showAdvanced = ref(false)
 const currentPreset = ref('default')
+const supportedUploadAccept = [
+  '.pdf',
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.doc',
+  '.docx',
+  '.xls',
+  '.xlsx',
+  '.ppt',
+  '.pptx',
+  '.html',
+  '.htm',
+  '.wav',
+  '.mp3',
+  '.flac',
+  '.m4a',
+  '.ogg',
+  '.mp4',
+  '.avi',
+  '.mkv',
+  '.mov',
+  '.fasta',
+  '.fa',
+  '.fna',
+  '.ffn',
+  '.faa',
+  '.frn',
+  '.fas',
+  '.gb',
+  '.gbk',
+  '.genbank',
+  '.gbff'
+].join(',')
 
 interface SubmitProgress { fileName: string; success: boolean; error: boolean; taskId?: string; errorMsg?: string }
 const submitProgress = ref<SubmitProgress[]>([])

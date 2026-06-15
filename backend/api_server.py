@@ -154,6 +154,54 @@ else:
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 logger.info(f"📁 Upload directory: {UPLOAD_DIR}")
 
+SUPPORTED_UPLOAD_EXTENSIONS = {
+    # Document and image parsing
+    ".pdf",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".ppt",
+    ".pptx",
+    ".html",
+    ".htm",
+    # Audio and video parsing
+    ".wav",
+    ".mp3",
+    ".flac",
+    ".m4a",
+    ".ogg",
+    ".mp4",
+    ".avi",
+    ".mkv",
+    ".mov",
+    # Professional sequence formats
+    ".fasta",
+    ".fa",
+    ".fna",
+    ".ffn",
+    ".faa",
+    ".frn",
+    ".fas",
+    ".gb",
+    ".gbk",
+    ".genbank",
+    ".gbff",
+}
+SUPPORTED_UPLOAD_EXTENSIONS_DISPLAY = ", ".join(sorted(SUPPORTED_UPLOAD_EXTENSIONS))
+
+
+def validate_upload_file_type(filename: str | None) -> None:
+    file_ext = Path(filename or "").suffix.lower()
+    if not file_ext or file_ext not in SUPPORTED_UPLOAD_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {file_ext or 'unknown'}. Supported formats: {SUPPORTED_UPLOAD_EXTENSIONS_DISPLAY}",
+        )
+
 
 # 注意：此函数已废弃，Worker 已自动上传图片到 MinIO 并替换 URL
 def process_markdown_images_legacy(md_content: str, image_dir: Path, result_path: str):
@@ -406,6 +454,8 @@ async def submit_task(
     ),
     current_user: User = Depends(require_permission(Permission.TASK_SUBMIT)),
 ):
+    validate_upload_file_type(file.filename)
+
     try:
         unique_filename = f"{uuid.uuid4().hex}_{file.filename}"
         temp_file_path = UPLOAD_DIR / unique_filename

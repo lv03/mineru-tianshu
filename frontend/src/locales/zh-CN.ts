@@ -182,7 +182,7 @@ export default {
     resetConfig: '恢复默认设置',
     priorityLabel: '任务优先级',
     priorityHint: '（0-100，数字越大越优先）',
-    supportedFormatsHint: '支持 PDF、图片、Word、Excel、PowerPoint、HTML、音频（MP3/WAV/M4A）、视频（MP4/AVI/MKV/MOV）、生物序列（FASTA/GenBank）等多种格式',
+    supportedFormatsHint: '支持 PDF、PNG/JPG、Word、Excel、PowerPoint、HTML、音频（MP3/WAV/FLAC/M4A/OGG）、视频（MP4/AVI/MKV/MOV）、FASTA/GenBank',
     enableFormulaRecognition: '启用公式识别',
     enableTableRecognition: '启用表格识别',
     tableRecognitionDisabledHint: '禁用后，表格将显示为图片。',
@@ -585,6 +585,7 @@ export default {
     dragDropHint: '或拖拽文件到此处',
     maxFileSize: '最大文件大小',
     fileTooLarge: '文件 {name} 超过最大大小限制',
+    invalidFileType: '文件 {name} 格式不支持',
   },
   error: {
     networkError: '网络错误',
